@@ -28,6 +28,9 @@ pub enum SelectedPath {
 
 /// One run of one experiment cell, following the result schema from plan
 /// section 11. Public IPs are never stored; only comparison results.
+///
+/// Fields that this PR does not measure yet are `None` / `null`, so an absent
+/// measurement is never mistaken for a measured zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentResult {
     pub schema_version: u32,
@@ -47,18 +50,20 @@ pub struct ExperimentResult {
     pub direct_connection_success: bool,
     pub time_to_direct_ms: Option<u64>,
     pub selected_path: Option<SelectedPath>,
-    // --- relay traffic ---
-    pub relay_control_tx_bytes: u64,
-    pub relay_control_rx_bytes: u64,
-    pub relay_media_tx_bytes: u64,
-    pub relay_media_rx_bytes: u64,
+    // --- relay traffic (measured from PR 3/6 onwards) ---
+    pub relay_control_tx_bytes: Option<u64>,
+    pub relay_control_rx_bytes: Option<u64>,
+    pub relay_media_tx_bytes: Option<u64>,
+    pub relay_media_rx_bytes: Option<u64>,
     // --- media / payload ---
     pub payload_bytes: u64,
-    pub throughput_mbps: Option<f64>,
+    /// Throughput of the payload transfer, in Mbit/s. Matches the
+    /// `media_throughput_mbps` field of the plan section 11 contract.
+    pub media_throughput_mbps: Option<f64>,
     pub failure_reason: Option<String>,
 }
 
-/// Build a fresh result for a run with all counters at zero / unknown.
+/// Build a fresh result for a run with all counters unknown / unset.
 pub fn new_result(
     run_id: impl Into<String>,
     method: &str,
@@ -79,12 +84,12 @@ pub fn new_result(
         direct_connection_success: false,
         time_to_direct_ms: None,
         selected_path: None,
-        relay_control_tx_bytes: 0,
-        relay_control_rx_bytes: 0,
-        relay_media_tx_bytes: 0,
-        relay_media_rx_bytes: 0,
+        relay_control_tx_bytes: None,
+        relay_control_rx_bytes: None,
+        relay_media_tx_bytes: None,
+        relay_media_rx_bytes: None,
         payload_bytes: 0,
-        throughput_mbps: None,
+        media_throughput_mbps: None,
         failure_reason: None,
     }
 }
@@ -95,11 +100,32 @@ mod rfc3339 {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
-        let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        s.serialize_u64(secs)
+        if *t < UNIX_EPOCH {
+            return Err(serde::ser::Error::custom(
+                "timestamp before unix epoch cannot be formatted as RFC 3339",
+            ));
+        }
+        s.serialize_str(&humantime::format_rfc3339_seconds(*t).to_string())
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SystemTime, D::Error> {
-        Ok(UNIX_EPOCH + std::time::Duration::from_secs(u64::deserialize(d)?))
+        let s = String::deserialize(d)?;
+        humantime::parse_rfc3339(&s)
+            .map(|st| UNIX_EPOCH + st.duration_since(UNIX_EPOCH).unwrap_or_default())
+            .map_err(serde::de::Error::custom)
     }
+}
+
+/// Append one result as a JSONL line, creating the parent directory if needed.
+pub fn append_result_line(path: &str, result: &ExperimentResult) -> anyhow::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{}", serde_json::to_string(result)?)?;
+    Ok(())
 }

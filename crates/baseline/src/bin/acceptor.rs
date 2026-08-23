@@ -4,6 +4,7 @@
 //! EndpointId + addresses, accepts one baseline echo connection, echoes all
 //! bytes back, and records path telemetry (plan E0 / PR 1).
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -11,6 +12,14 @@ use clap::Parser;
 use common::{ExperimentResult, SelectedPath, TEST_PAYLOAD_BYTES};
 use iroh::endpoint::PathEvent;
 use tokio_stream::StreamExt;
+
+/// Shared telemetry snapshot written by the path-event watcher task.
+#[derive(Default)]
+struct PathTelemetry {
+    first_direct: Option<Duration>,
+    /// Whether the most recent `Selected` event chose a relay path.
+    last_selected_is_relay: bool,
+}
 
 #[derive(Parser)]
 struct Args {
@@ -44,12 +53,7 @@ fn main() -> Result<()> {
             r
         }
     };
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&args.results)?;
-    writeln!(f, "{}", serde_json::to_string(&result)?)?;
+    common::append_result_line(&args.results, &result)?;
 
     if let Some(reason) = result.failure_reason.clone() {
         anyhow::bail!("run failed: {reason}");
@@ -81,9 +85,36 @@ async fn run() -> Result<ExperimentResult> {
     let t_start = Instant::now();
     println!("CONNECTED_AT_MS={}", t_start.elapsed().as_millis());
 
-    // Record path events (relay -> direct transition is the E0 signal).
-    let mut first_direct: Option<Duration> = None;
-    let mut last_selected_is_relay = true;
+    // Watch path events from before the echo transfer starts, so a
+    // relay -> direct migration during the transfer is observed.
+    // PathEventStream is 'static; the snapshot mutex keeps observed values
+    // even though the stream stays pending on a live connection.
+    let mut events = conn.path_events();
+    let telemetry = Arc::new(Mutex::new(PathTelemetry {
+        first_direct: None,
+        last_selected_is_relay: true,
+    }));
+    let watcher = tokio::spawn({
+        let telemetry = Arc::clone(&telemetry);
+        async move {
+            while let Some(event) = events.next().await {
+                match event {
+                    PathEvent::Selected { remote_addr, .. } => {
+                        let mut t = telemetry.lock().unwrap();
+                        t.last_selected_is_relay = remote_addr.is_relay();
+                        if !remote_addr.is_relay() && t.first_direct.is_none() {
+                            t.first_direct = Some(t_start.elapsed());
+                        }
+                        tracing::info!(addr = %remote_addr, "path selected");
+                    }
+                    PathEvent::Opened { remote_addr, .. } => {
+                        tracing::info!(addr = %remote_addr, "path opened");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
 
     // Echo loop: read everything the dialer sends, write it back.
     let (mut send, mut recv) = conn.accept_bi().await.context("accept_bi failed")?;
@@ -99,34 +130,28 @@ async fn run() -> Result<ExperimentResult> {
     }
     send.finish()?;
     println!("ECHOED_BYTES={echoed}");
-
-    // Drain remaining path events after the transfer.
-    let mut events = conn.path_events();
-    while let Some(event) = events.next().await {
-        match event {
-            PathEvent::Selected { remote_addr, .. } => {
-                last_selected_is_relay = remote_addr.is_relay();
-                if !remote_addr.is_relay() && first_direct.is_none() {
-                    first_direct = Some(t_start.elapsed());
-                    println!("TIME_TO_DIRECT_MS={}", t_start.elapsed().as_millis());
-                }
-                tracing::info!(addr = %remote_addr, "path selected");
-            }
-            PathEvent::Opened { remote_addr, .. } => {
-                tracing::info!(addr = %remote_addr, "path opened");
-            }
-            _ => {}
-        }
-    }
     let elapsed = t_start.elapsed();
 
+    // Give late direct migration a brief window, then read the snapshot.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (first_direct, last_selected_is_relay) = {
+        let t = telemetry.lock().unwrap();
+        (t.first_direct, t.last_selected_is_relay)
+    };
+    watcher.abort();
+
     let stats = conn.stats();
-    let selected_rtt = conn
-        .paths()
-        .iter()
-        .filter(|p| p.is_selected())
-        .map(|p| p.rtt())
-        .next();
+    // Extract owned values from the borrowed path snapshot.
+    let (selected_rtt, _selected_is_relay) = {
+        let paths = conn.paths();
+        match paths.iter().find(|p| p.is_selected()) {
+            Some(p) => (Some(p.rtt()), p.is_relay()),
+            None => (None, true),
+        }
+    };
+    if let Some(ms) = first_direct {
+        println!("TIME_TO_DIRECT_MS={}", ms.as_millis());
+    }
 
     let mut result =
         common::new_result(format!("baseline-accept-{}", run_suffix()), "baseline", "unspecified");
@@ -138,9 +163,13 @@ async fn run() -> Result<ExperimentResult> {
         SelectedPath::DirectIp
     });
     result.payload_bytes = echoed;
-    result.throughput_mbps = Some(echoed as f64 * 8.0 / elapsed.as_secs_f64() / 1_000_000.0);
+    let secs = elapsed.as_secs_f64().max(0.001);
+    result.media_throughput_mbps = Some(echoed as f64 * 8.0 / secs / 1_000_000.0);
 
-    println!("RTT_MS={}", selected_rtt.map(|d| d.as_millis()).unwrap_or(0));
+    println!(
+        "RTT_MS={}",
+        selected_rtt.map(|d| d.as_millis()).unwrap_or(0)
+    );
     println!("ELAPSED_SECS={:.3}", elapsed.as_secs_f64());
     println!(
         "UDP_TX_DATAGRAMS={} UDP_RX_DATAGRAMS={}",

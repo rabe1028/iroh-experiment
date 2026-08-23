@@ -8,4 +8,5 @@ license.workspace = true
 iroh.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+humantime = "2"
 anyhow.workspace = true

@@ -4,15 +4,25 @@
 //! of random data, verifies the echo, and records path telemetry (relay ->
 //! direct transition timing) as a JSON result line (plan E0 / PR 1).
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{new_result, ExperimentResult, BASELINE_ALPN, SelectedPath, TEST_PAYLOAD_BYTES};
+use common::{
+    new_result, ExperimentResult, BASELINE_ALPN, SelectedPath, TEST_PAYLOAD_BYTES,
+};
 use iroh::endpoint::PathEvent;
-use tokio_stream::StreamExt;
 use iroh::EndpointId;
 use rand::RngCore;
+use tokio_stream::StreamExt;
+
+/// Shared telemetry snapshot written by the path-event watcher task.
+#[derive(Default)]
+struct PathTelemetry {
+    /// Time of the first `Selected` event on a non-relay path.
+    first_direct: Option<Duration>,
+}
 
 #[derive(Parser)]
 struct Args {
@@ -36,23 +46,21 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let outcome = runtime.block_on(run(&args.id));
+    let outcome = runtime.block_on(run(&args));
 
     let result = match outcome {
         Ok(r) => r,
         Err(e) => {
-            let mut r =
-                new_result(format!("baseline-dial-{}", run_suffix()), "baseline", &args.network_profile);
+            let mut r = new_result(
+                format!("baseline-dial-{}", run_suffix()),
+                "baseline",
+                &args.network_profile,
+            );
             r.failure_reason = Some(format!("{e:#}"));
             r
         }
     };
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&args.results)?;
-    writeln!(f, "{}", serde_json::to_string(&result)?)?;
+    common::append_result_line(&args.results, &result)?;
 
     if let Some(reason) = result.failure_reason.clone() {
         anyhow::bail!("run failed: {reason}");
@@ -60,31 +68,43 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run(id: &str) -> Result<ExperimentResult> {
+async fn run(args: &Args) -> Result<ExperimentResult> {
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .bind()
         .await
         .context("failed to bind iroh endpoint")?;
 
-    let target: EndpointId = id.parse().context("invalid EndpointId")?;
+    let target: EndpointId = args.id.parse().context("invalid EndpointId")?;
     let t_dial = Instant::now();
 
-    let conn = endpoint.connect(target, BASELINE_ALPN).await.context("connect failed")?;
+    let conn = endpoint
+        .connect(target, BASELINE_ALPN)
+        .await
+        .context("connect failed")?;
     println!("CONNECTED_AT_MS={}", t_dial.elapsed().as_millis());
 
-    // Collect path events while transferring; PathEventStream is 'static.
+    // Watch path events from before any data is transferred; PathEventStream
+    // is 'static so the watcher runs in a spawned task. The snapshot mutex
+    // keeps observed values even though the stream stays pending on a live
+    // connection.
     let mut events = conn.path_events();
     let t_events = Instant::now();
-    let event_task = tokio::spawn(async move {
-        let mut first_direct: Option<Duration> = None;
-        while let Some(event) = events.next().await {
-            if let PathEvent::Selected { remote_addr, .. } = event {
-                if !remote_addr.is_relay() && first_direct.is_none() {
-                    first_direct = Some(t_events.elapsed());
+    let telemetry = Arc::new(Mutex::new(PathTelemetry::default()));
+    let watcher = tokio::spawn({
+        let telemetry = Arc::clone(&telemetry);
+        async move {
+            while let Some(event) = events.next().await {
+                if let PathEvent::Selected { remote_addr, .. } = event {
+                    if !remote_addr.is_relay() {
+                        let mut t = telemetry.lock().unwrap();
+                        if t.first_direct.is_none() {
+                            t.first_direct = Some(t_events.elapsed());
+                        }
+                    }
+                    tracing::info!(addr = %remote_addr, "path selected");
                 }
             }
         }
-        first_direct
     });
 
     let (mut send, mut recv) = conn.open_bi().await.context("open_bi failed")?;
@@ -101,7 +121,9 @@ async fn run(id: &str) -> Result<ExperimentResult> {
         send.write_all(&tx_buf[..n]).await?;
         sent += n as u64;
 
-        recv.read_exact(&mut rx_buf[..n]).await.context("echo read failed")?;
+        recv.read_exact(&mut rx_buf[..n])
+            .await
+            .context("echo read failed")?;
         if rx_buf[..n] != tx_buf[..n] {
             anyhow::bail!("echo mismatch at offset {sent}");
         }
@@ -111,39 +133,37 @@ async fn run(id: &str) -> Result<ExperimentResult> {
     drop(recv);
     let elapsed = t_start.elapsed();
 
-    // Wait briefly for remaining path events (e.g. late direct migration),
-    // then take the final path snapshot.
+    // Give late direct migration a brief window, then read the snapshot.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let first_direct: Option<Duration> = if event_task.is_finished() {
-        event_task.await.unwrap_or(None)
-    } else {
-        event_task.abort();
-        None
-    };
+    let first_direct = telemetry.lock().unwrap().first_direct;
+    watcher.abort();
 
     let stats = conn.stats();
-    let selected_rtt = conn
-        .paths()
-        .iter()
-        .filter(|p| p.is_selected())
-        .map(|p| p.rtt())
-        .next();
+    // Extract owned values from the borrowed path snapshot.
+    let (selected_rtt, selected_is_relay) = {
+        let paths = conn.paths();
+        match paths.iter().find(|p| p.is_selected()) {
+            Some(p) => (Some(p.rtt()), p.is_relay()),
+            None => (None, true),
+        }
+    };
 
     println!("SENT_BYTES={sent}");
     println!("ECHOED_BYTES={echoed}");
     println!("ELAPSED_SECS={:.3}", elapsed.as_secs_f64());
-    println!("RTT_MS={}", selected_rtt.map(|d| d.as_millis()).unwrap_or(0));
+    println!(
+        "RTT_MS={}",
+        selected_rtt.map(|d| d.as_millis()).unwrap_or(0)
+    );
+    if let Some(ms) = first_direct {
+        println!("TIME_TO_DIRECT_MS={}", ms.as_millis());
+    }
 
-    let mut result =
-        new_result(format!("baseline-dial-{}", run_suffix()), "baseline", "unspecified");
-    // The dialer's own path view: use live paths snapshot for final state.
-    let selected_is_relay = conn
-        .paths()
-        .iter()
-        .filter(|p| p.is_selected())
-        .map(|p| p.is_relay())
-        .next()
-        .unwrap_or(true);
+    let mut result = new_result(
+        format!("baseline-dial-{}", run_suffix()),
+        "baseline",
+        &args.network_profile,
+    );
     result.direct_connection_success = !selected_is_relay;
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {
@@ -152,7 +172,8 @@ async fn run(id: &str) -> Result<ExperimentResult> {
         SelectedPath::DirectIp
     });
     result.payload_bytes = echoed;
-    result.throughput_mbps = Some(echoed as f64 * 8.0 / elapsed.as_secs_f64() / 1_000_000.0);
+    let secs = elapsed.as_secs_f64().max(0.001);
+    result.media_throughput_mbps = Some(echoed as f64 * 8.0 / secs / 1_000_000.0);
 
     println!(
         "UDP_TX_DATAGRAMS={} UDP_RX_DATAGRAMS={}",
