@@ -1,0 +1,4 @@
+/target
+results/raw/
+*.qlog
+.env
