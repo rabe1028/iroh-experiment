@@ -122,14 +122,14 @@ pub fn append_result_line(path: &str, result: &ExperimentResult) -> anyhow::Resu
     if let Some(parent) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let line = serde_json::to_string(result)?;
+    let mut line = serde_json::to_string(result)?;
+    line.push('\n');
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;
-    // Single write so concurrent processes appending to the same JSONL file
-    // cannot interleave two records.
+    // One write_all call so concurrent processes appending to the same JSONL
+    // file cannot interleave two records.
     f.write_all(line.as_bytes())?;
-    f.write_all(b"\n")?;
     Ok(())
 }

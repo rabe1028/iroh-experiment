@@ -13,6 +13,10 @@ use common::{ExperimentResult, SelectedPath, TEST_PAYLOAD_BYTES};
 use iroh::endpoint::PathEvent;
 use tokio_stream::StreamExt;
 
+/// Experiment-wide upper bound for waiting on a relay -> direct migration
+/// after the payload transfer completes.
+const DIRECT_MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Shared telemetry snapshot written by the path-event watcher task.
 #[derive(Default)]
 struct PathTelemetry {
@@ -135,11 +139,22 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
     println!("ECHOED_BYTES={echoed}");
     let elapsed = t_start.elapsed();
 
-    // Give late direct migration a brief window, then read the snapshot.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let (first_direct, last_selected_is_relay) = {
-        let t = telemetry.lock().unwrap();
-        (t.first_direct, t.last_selected_is_relay)
+    // Wait for the direct migration instead of a fixed sleep: a fixed window
+    // would truncate observation on high-latency / lossy profiles and bias
+    // direct-success rates. Stop as soon as a direct path was selected, the
+    // connection closed, or the experiment-wide timeout expired.
+    let (first_direct, last_selected_is_relay) = loop {
+        {
+            let t = telemetry.lock().unwrap();
+            if !t.last_selected_is_relay
+                || first_direct_ready(&t)
+                || conn.close_reason().is_some()
+                || t_start.elapsed() > DIRECT_MIGRATION_TIMEOUT
+            {
+                break (t.first_direct, t.last_selected_is_relay);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     };
     watcher.abort();
 
@@ -188,6 +203,11 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
 
     endpoint.close().await;
     Ok(result)
+}
+
+/// True once a direct transition was ever observed.
+fn first_direct_ready(t: &PathTelemetry) -> bool {
+    t.first_direct.is_some()
 }
 
 fn run_suffix() -> String {

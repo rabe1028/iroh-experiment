@@ -20,9 +20,14 @@ use tokio_stream::StreamExt;
 /// Shared telemetry snapshot written by the path-event watcher task.
 #[derive(Default)]
 struct PathTelemetry {
-    /// Time of the first `Selected` event on a non-relay path.
+    /// Time of the first `Selected` event on a non-relay path,
+    /// measured from dial start.
     first_direct: Option<Duration>,
 }
+
+/// Experiment-wide upper bound for waiting on a relay -> direct migration
+/// after the payload transfer completes.
+const DIRECT_MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 struct Args {
@@ -86,9 +91,10 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     // Watch path events from before any data is transferred; PathEventStream
     // is 'static so the watcher runs in a spawned task. The snapshot mutex
     // keeps observed values even though the stream stays pending on a live
-    // connection.
+    // connection. Timing is measured from the dial start (t_dial) so that
+    // relay connection and QUIC handshake time are included in
+    // time_to_direct_ms.
     let mut events = conn.path_events();
-    let t_events = Instant::now();
     let telemetry = Arc::new(Mutex::new(PathTelemetry::default()));
     let watcher = tokio::spawn({
         let telemetry = Arc::clone(&telemetry);
@@ -98,7 +104,7 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
                     if !remote_addr.is_relay() {
                         let mut t = telemetry.lock().unwrap();
                         if t.first_direct.is_none() {
-                            t.first_direct = Some(t_events.elapsed());
+                            t.first_direct = Some(t_dial.elapsed());
                         }
                     }
                     tracing::info!(addr = %remote_addr, "path selected");
@@ -133,9 +139,20 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     drop(recv);
     let elapsed = t_start.elapsed();
 
-    // Give late direct migration a brief window, then read the snapshot.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let first_direct = telemetry.lock().unwrap().first_direct;
+    // Wait for the direct migration instead of a fixed sleep: a fixed window
+    // would truncate observation on high-latency / lossy profiles and bias
+    // direct-success rates. Stop as soon as a direct path was observed, the
+    // connection closed, or the experiment-wide timeout expired.
+    let first_direct = loop {
+        let current = telemetry.lock().unwrap().first_direct;
+        if current.is_some()
+            || conn.close_reason().is_some()
+            || t_dial.elapsed() > DIRECT_MIGRATION_TIMEOUT
+        {
+            break current;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
     watcher.abort();
 
     let stats = conn.stats();
