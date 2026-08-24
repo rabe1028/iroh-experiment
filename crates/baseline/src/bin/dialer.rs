@@ -164,7 +164,9 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
         "baseline",
         &args.network_profile,
     );
-    result.direct_connection_success = !selected_is_relay;
+    // A direct path may be established and later lost before sampling;
+    // success means a direct path was observed at any point in the run.
+    result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {
         SelectedPath::Relay

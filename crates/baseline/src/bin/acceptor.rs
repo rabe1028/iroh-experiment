@@ -26,6 +26,9 @@ struct Args {
     /// File to append a JSON result line to (JSONL).
     #[arg(long)]
     results: String,
+    /// Network profile label recorded in the result.
+    #[arg(long, default_value = "unspecified")]
+    network_profile: String,
 }
 
 fn main() -> Result<()> {
@@ -38,7 +41,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let outcome = runtime.block_on(run());
+    let outcome = runtime.block_on(run(&args.network_profile));
 
     // Persist a result line even on failure (with failure_reason set).
     let result = match outcome {
@@ -47,7 +50,7 @@ fn main() -> Result<()> {
             let mut r = common::new_result(
                 format!("baseline-accept-{}", run_suffix()),
                 "baseline",
-                "unspecified",
+                &args.network_profile,
             );
             r.failure_reason = Some(format!("{e:#}"));
             r
@@ -61,7 +64,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run() -> Result<ExperimentResult> {
+async fn run(network_profile: &str) -> Result<ExperimentResult> {
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .bind()
         .await
@@ -141,12 +144,15 @@ async fn run() -> Result<ExperimentResult> {
     watcher.abort();
 
     let stats = conn.stats();
-    // Extract owned values from the borrowed path snapshot.
-    let (selected_rtt, _selected_is_relay) = {
+    // Final state comes from the live path snapshot; the event snapshot is
+    // only used for transition timing. If the direct path was selected before
+    // the watcher subscribed, or its event is still pending, the live snapshot
+    // still reports it correctly.
+    let (selected_rtt, selected_is_relay) = {
         let paths = conn.paths();
         match paths.iter().find(|p| p.is_selected()) {
             Some(p) => (Some(p.rtt()), p.is_relay()),
-            None => (None, true),
+            None => (None, last_selected_is_relay),
         }
     };
     if let Some(ms) = first_direct {
@@ -154,10 +160,14 @@ async fn run() -> Result<ExperimentResult> {
     }
 
     let mut result =
-        common::new_result(format!("baseline-accept-{}", run_suffix()), "baseline", "unspecified");
-    result.direct_connection_success = !last_selected_is_relay;
+        common::new_result(
+            format!("baseline-accept-{}", run_suffix()),
+            "baseline",
+            network_profile,
+        );
+    result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
-    result.selected_path = Some(if last_selected_is_relay {
+    result.selected_path = Some(if selected_is_relay {
         SelectedPath::Relay
     } else {
         SelectedPath::DirectIp
