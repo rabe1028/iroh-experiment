@@ -788,18 +788,41 @@ pub async fn send_synthetic<S>(
 where
     S: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    // Block until direct is ready (bounded by the overall duration).
-    tokio::time::timeout(cfg.duration, async {
-        while !matches!(*state_rx.borrow_and_update(), GateState::DirectReady) {
-            state_rx
-                .changed()
-                .await
-                .map_err(|_| anyhow_err!("gate closed"))?;
+    // Block until direct is ready (bounded by the overall duration). A gate
+    // that latched Stopped before the first DirectReady snapshot is
+    // terminal: waiting for another watch update could delay the failure
+    // report until the duration expires (a full 60-minute traffic profile)
+    // instead of the required fail-closed interval.
+    enum WaitOutcome {
+        BecameReady,
+        StoppedEarly,
+        GateClosed,
+    }
+    let outcome = tokio::time::timeout(cfg.duration, async {
+        loop {
+            match *state_rx.borrow_and_update() {
+                GateState::DirectReady => return WaitOutcome::BecameReady,
+                GateState::Stopped(_) => return WaitOutcome::StoppedEarly,
+                GateState::AwaitingDirect => {}
+            }
+            if state_rx.changed().await.is_err() {
+                return WaitOutcome::GateClosed;
+            }
         }
-        Ok::<_, anyhow::Error>(())
     })
     .await
-    .context("timed out waiting for direct-ready")??;
+    .context("timed out waiting for direct-ready")?;
+    match outcome {
+        WaitOutcome::BecameReady => {}
+        WaitOutcome::StoppedEarly => {
+            let stats = StreamStats {
+                stop_reason: gate_stop_reason(&gate),
+                ..Default::default()
+            };
+            return Ok(stats);
+        }
+        WaitOutcome::GateClosed => return Err(anyhow_err!("gate closed")),
+    }
 
     let handle = tokio::spawn(streaming_task(stream, cfg, gate));
     handle.await.context("sender task panicked")?
