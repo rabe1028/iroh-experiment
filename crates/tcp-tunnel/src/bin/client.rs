@@ -109,9 +109,15 @@ async fn tunnel_one(
             )
         }
         Err(e) => {
-            // A dead cached connection is recycled by the next caller.
+            // A dead cached connection is recycled by the next caller —
+            // but only if the cache still holds that dead connection:
+            // another task may have already redialled and cached a
+            // healthy replacement, which must not be discarded.
             if is_connection_lost(&e) {
-                conn.lock().unwrap().take();
+                let mut guard = conn.lock().unwrap();
+                if guard.as_ref().is_some_and(|c| c.close_reason().is_some()) {
+                    *guard = None;
+                }
             }
             return Err(e);
         }

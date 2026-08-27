@@ -137,16 +137,31 @@ async fn run(
                     if !authorized(&conn, allow) {
                         // Read the request just far enough to answer with the
                         // protocol's Unauthorized status instead of a bare
-                        // close, then drop the connection.
+                        // close, then drop the connection. Bounded: a peer
+                        // that completes the handshake but never opens a
+                        // stream (or sends a partial request) must not park
+                        // this task and connection forever.
+                        const REJECT_TIMEOUT: std::time::Duration =
+                            std::time::Duration::from_secs(10);
                         tokio::spawn(async move {
-                            if let Ok((send, recv)) = conn.accept_bi().await {
+                            let attempt = async {
+                                let (send, recv) = conn.accept_bi().await?;
                                 let mut pair = StreamPair::new(send, recv);
-                                if tcp_tunnel::read_request(&mut pair).await.is_ok() {
+                                tcp_tunnel::read_request(&mut pair).await?;
+                                Ok::<_, anyhow::Error>(pair)
+                            };
+                            match tokio::time::timeout(REJECT_TIMEOUT, attempt).await {
+                                Ok(Ok(mut pair)) => {
                                     let _ = tcp_tunnel::send_terminal_status(
                                         &mut pair,
                                         tcp_tunnel::TunnelStatus::Unauthorized,
                                     )
                                     .await;
+                                }
+                                _ => {
+                                    // Timeout, refusal, or malformed request:
+                                    // close instead of lingering.
+                                    conn.close(1u32.into(), b"unauthorized");
                                 }
                             }
                         });
