@@ -135,6 +135,21 @@ async fn run(
             Ok(connecting) => match connecting.await {
                 Ok(conn) => {
                     if !authorized(&conn, allow) {
+                        // Read the request just far enough to answer with the
+                        // protocol's Unauthorized status instead of a bare
+                        // close, then drop the connection.
+                        tokio::spawn(async move {
+                            if let Ok((send, recv)) = conn.accept_bi().await {
+                                let mut pair = StreamPair::new(send, recv);
+                                if tcp_tunnel::read_request(&mut pair).await.is_ok() {
+                                    let _ = tcp_tunnel::send_terminal_status(
+                                        &mut pair,
+                                        tcp_tunnel::TunnelStatus::Unauthorized,
+                                    )
+                                    .await;
+                                }
+                            }
+                        });
                         continue;
                     }
                     tokio::spawn(serve_connection(conn, services.clone()));

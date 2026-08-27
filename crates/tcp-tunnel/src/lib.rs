@@ -153,6 +153,10 @@ impl ServiceMap {
             "invalid --service {spec:?}: expected name=host:port"
         ))?;
         anyhow::ensure!(!name.is_empty(), "empty service name in {spec:?}");
+        anyhow::ensure!(
+            name.len() <= MAX_SERVICE_ID_LEN as usize,
+            "service name exceeds {MAX_SERVICE_ID_LEN} bytes in {spec:?};              clients could never request it"
+        );
         self.validate_upstream(addr)
             .context(format!("invalid upstream for service {name:?}"))?;
         self.0.insert(name.to_string(), Target(addr.to_string()));
@@ -238,10 +242,10 @@ impl AsyncWrite for StreamPair {
 }
 
 /// Send a terminal status and finish the write side so the client reliably
-/// reads it: with a real `StreamPair`, returning while the send side is
+/// reads it (also used by the gateway for the pre-auth rejection reply): with a real `StreamPair`, returning while the send side is
 /// unfinished drops an unfinished QUIC SendStream, which can reset the
 /// stream before the status is delivered.
-async fn send_terminal_status<S>(stream: &mut S, status: TunnelStatus) -> Result<()>
+pub async fn send_terminal_status<S>(stream: &mut S, status: TunnelStatus) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {

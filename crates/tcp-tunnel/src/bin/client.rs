@@ -30,6 +30,12 @@ struct Args {
     /// Service id requested for every tunnelled connection.
     #[arg(long)]
     service: String,
+    /// File holding the client's 32-byte secret key, created with a fresh
+    /// key on first use (0600). Without it every launch mints a new
+    /// EndpointId, so a gateway using --allow-endpoint drops the restarted
+    /// client until its allowlist is updated.
+    #[arg(long)]
+    key_file: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -49,7 +55,11 @@ fn main() -> Result<()> {
 type SharedConn = Arc<Mutex<Option<iroh::endpoint::Connection>>>;
 
 async fn run(args: &Args) -> Result<()> {
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+    let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0);
+    if let Some(path) = &args.key_file {
+        builder = builder.secret_key(load_or_create_key(path)?);
+    }
+    let endpoint = builder
         .bind()
         .await
         .context("failed to bind iroh endpoint")?;
@@ -150,4 +160,58 @@ async fn get_or_dial(
             Ok(c)
         }
     }
+}
+
+
+/// Load the client's secret key from `path`, creating it owner-only on
+/// first use, so the EndpointId (and the gateway's --allow-endpoint entry)
+/// survives client restarts.
+fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            restrict_key_permissions(path)?;
+            iroh::SecretKey::try_from(bytes.as_slice()).context("parse client key file")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let key = iroh::SecretKey::generate();
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).context("create key file parent")?;
+                }
+            }
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                    .context("create client key file")?;
+                f.write_all(&key.to_bytes()).context("write client key file")?;
+            }
+            #[cfg(not(unix))]
+            std::fs::write(path, key.to_bytes()).context("write client key file")?;
+            Ok(key)
+        }
+        Err(e) => Err(e).context("read client key file"),
+    }
+}
+
+/// Correct an existing key file that is readable beyond the owner.
+#[cfg(unix)]
+fn restrict_key_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::metadata(path).context("stat client key file")?.permissions();
+    if perms.mode() & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .context("restrict client key file permissions")?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_key_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
