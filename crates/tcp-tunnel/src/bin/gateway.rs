@@ -49,6 +49,17 @@ fn main() -> Result<()> {
         .iter()
         .map(|s| parse_allow_rule(s))
         .collect::<Result<_>>()?;
+    // Fail at startup instead of silently producing an empty scope later:
+    // a typo in ID=SERVICE would otherwise authorize an endpoint that can
+    // then reach nothing (every request answered UnknownService).
+    for rule in &allow {
+        if let Some(name) = &rule.service {
+            anyhow::ensure!(
+                services.get(name).is_some(),
+                "--allow-endpoint rule references unknown service {name:?}"
+            );
+        }
+    }
     if allow.is_empty() {
         println!("AUTHORIZATION=any-endpoint (no --allow-endpoint configured)");
     } else {

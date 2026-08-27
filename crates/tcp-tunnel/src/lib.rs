@@ -14,6 +14,11 @@
 //!
 //! The gateway only forwards to services listed in its [`ServiceMap`], so it
 //! is never an open proxy (plan section 19).
+//!
+//! Known limitation: the wire request carries only the protocol version and
+//! service id, so the third §19 authorization factor — a short-lived
+//! capability — is not implemented yet; an allowlisted endpoint key remains
+//! authorized until its rules are removed from the gateway config.
 
 use std::collections::BTreeMap;
 
