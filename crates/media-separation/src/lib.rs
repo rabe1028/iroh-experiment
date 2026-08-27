@@ -918,6 +918,12 @@ pub struct SessionOutcome {
     pub ever_relay_paths: u64,
 }
 
+/// Upper bound for the post-connect media handshake (both roles). Without
+/// it, a peer that completes the QUIC connection but never opens the stream
+/// or completes the request/ready exchange would hang the one-shot binaries
+/// past the accept timeout and past the experiment's result recording.
+const MEDIA_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Run the receiver half of a media session on an accepted media connection.
 ///
 /// `started_unix_ms` must be taken before waiting for the media connection,
@@ -934,10 +940,19 @@ pub async fn run_receiver_session(
     let state_rx = lock_gate(&gate).subscribe();
     let mut monitor = spawn_media_monitor(&conn, gate.clone());
 
-    let (mut send, mut recv) = conn.accept_bi().await.context("accept bi")?;
-    let req = read_frame(&mut recv).await.context("read media request")?;
-    anyhow::ensure!(req.is_empty(), "unexpected request payload");
-    write_frame(&mut send, b"ready").await?;
+    let handshake = async {
+        let (mut send, mut recv) = conn.accept_bi().await.context("accept bi")?;
+        let req = read_frame(&mut recv).await.context("read media request")?;
+        anyhow::ensure!(req.is_empty(), "unexpected request payload");
+        write_frame(&mut send, b"ready").await?;
+        Ok::<_, anyhow::Error>((send, recv))
+    };
+    let (mut send, recv) =
+        tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
+            .await
+            .map_err(|_| {
+                anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
+            })??;
 
     let (stats, _next_seq) = receive_synthetic(recv, gate.clone(), state_rx).await?;
     let _ = send.shutdown().await;
@@ -982,10 +997,20 @@ pub async fn run_sender_session(
     let state_rx = lock_gate(&gate).subscribe();
     let mut monitor = spawn_media_monitor(&conn, gate.clone());
 
-    let (mut send, mut recv) = conn.open_bi().await.context("open bi")?;
-    write_frame(&mut send, b"").await.context("send request")?;
-    let ready = read_frame(&mut recv).await.context("read ready")?;
-    anyhow::ensure!(ready == b"ready", "receiver not ready");
+    let handshake = async {
+        let (mut send, recv) = conn.open_bi().await.context("open bi")?;
+        write_frame(&mut send, b"").await.context("send request")?;
+        let mut recv = recv;
+        let ready = read_frame(&mut recv).await.context("read ready")?;
+        anyhow::ensure!(ready == b"ready", "receiver not ready");
+        Ok::<_, anyhow::Error>((send, recv))
+    };
+    let (send, mut recv) =
+        tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
+            .await
+            .map_err(|_| {
+                anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
+            })??;
 
     let stats = send_synthetic(send, cfg, gate.clone(), state_rx).await?;
     let _ = recv.read_to_end(64 * 1024).await;
