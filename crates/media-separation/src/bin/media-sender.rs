@@ -68,6 +68,9 @@ fn main() -> Result<()> {
                     "fail-closed gate tripped: ever_relay_paths={} gate={gate_state:?}",
                     outcome.ever_relay_paths
                 ));
+            } else if !outcome.receiver_confirmed {
+                result.failure_reason =
+                    Some("receiver never confirmed stream completion".into());
             }
             println!("OUTCOME={}", serde_json::to_string(&outcome)?);
         }

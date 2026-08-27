@@ -510,6 +510,16 @@ pub fn spawn_media_monitor(conn: &Connection, gate: Arc<Mutex<MediaGate>>) -> Me
 
 /// Reconciliation loop: snapshot -> gate, until the gate latches or the
 /// connection closes.
+/// Whether a path event references a relay transport address.
+fn event_has_relay_path(event: &iroh::endpoint::PathEvent) -> bool {
+    match event {
+        iroh::endpoint::PathEvent::Opened { remote_addr, .. }
+        | iroh::endpoint::PathEvent::Selected { remote_addr, .. }
+        | iroh::endpoint::PathEvent::Closed { remote_addr, .. } => remote_addr.is_relay(),
+        _ => false,
+    }
+}
+
 async fn monitor_loop(
     conn: &Connection,
     gate: &Arc<Mutex<MediaGate>>,
@@ -520,7 +530,22 @@ async fn monitor_loop(
 ) {
     loop {
         tokio::select! {
-            _ = events.next() => {}
+            maybe_event = events.next() => {
+                // Inspect the event itself, not just the next snapshot: a
+                // relay path that opens and closes entirely between two
+                // snapshots would otherwise never raise ever_relay_paths
+                // nor latch the gate.
+                if let Some(event) = maybe_event {
+                    if event_has_relay_path(&event) {
+                        ever_relay_count.fetch_add(1, Ordering::Relaxed);
+                        lock_gate(gate).apply(PathSignal::Snapshot {
+                            open_direct: 0,
+                            has_relay: true,
+                            selected_direct: false,
+                        });
+                    }
+                }
+            }
             _ = ticker.tick() => {}
             _ = conn.closed() => {
                 lock_gate(gate).apply(PathSignal::ConnectionClosed);
@@ -635,9 +660,12 @@ impl SyntheticConfig {
 
     /// Interval between frames to hit `bitrate_bps` on average.
     pub fn frame_interval(&self) -> Duration {
-        let bytes_per_sec = (self.bitrate_bps / 8).max(1);
-        let frames_per_sec = (bytes_per_sec / self.frame_payload_bytes.max(1) as u64).max(1);
-        Duration::from_nanos(1_000_000_000u64.saturating_div(frames_per_sec))
+        // Fractional-second intervals for sub-one-frame-per-second rates:
+        // integer division floored them to one frame per second (a 1 Kbit/s
+        // target with 1200-byte frames would actually run at 9.6 Kbit/s).
+        let bits_per_frame =
+            (SyntheticConfig::HEADER_BYTES as u64 + self.frame_payload_bytes.max(1) as u64) * 8;
+        Duration::from_secs_f64(bits_per_frame as f64 / self.bitrate_bps.max(1) as f64)
     }
 }
 
@@ -990,6 +1018,10 @@ pub struct SessionOutcome {
     pub relay_media_bytes: Option<u64>,
     /// Count of relay paths ever observed by the monitor.
     pub ever_relay_paths: u64,
+    /// Sender-side only: whether the receiver read the stream to the end and
+    /// closed its half within the completion window. A run without this
+    /// confirmation must not serialize as an unqualified success.
+    pub receiver_confirmed: bool,
 }
 
 /// Upper bound for the post-connect media handshake (both roles). Without
@@ -1054,6 +1086,7 @@ pub async fn run_receiver_session(
         time_to_direct_ms,
         relay_media_bytes: None,
         ever_relay_paths: ever_relay,
+        receiver_confirmed: true,
         stream: stats,
     };
     Ok((outcome, gate))
@@ -1098,12 +1131,12 @@ pub async fn run_sender_session(
     let stats = send_synthetic(send, cfg, gate.clone(), state_rx).await?;
     // Bounded: a receiver that finishes its stream but never closes its send
     // half must not hold the one-shot sender past its duration without a
-    // result row.
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        recv.read_to_end(64 * 1024),
-    )
-    .await;
+    // result row. A timeout or read error is recorded so a run without the
+    // receiver's confirmation is not reported as an unqualified success.
+    let receiver_confirmed = matches!(
+        tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(64 * 1024)).await,
+        Ok(Ok(_))
+    );
 
     // End monitoring and take the final counters.
     monitor.stop();
@@ -1122,6 +1155,7 @@ pub async fn run_sender_session(
         time_to_direct_ms,
         relay_media_bytes: None,
         ever_relay_paths: ever_relay,
+        receiver_confirmed,
         stream: stats,
     };
     Ok((outcome, gate))
