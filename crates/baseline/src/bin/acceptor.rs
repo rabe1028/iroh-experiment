@@ -66,6 +66,7 @@ fn main() -> Result<()> {
             let mut r = common::new_result(
                 format!("baseline-accept-{}", run_suffix()),
                 "baseline",
+                "acceptor",
                 &args.network_profile,
             );
             r.failure_reason = Some(format!("{e:#}"));
@@ -92,7 +93,12 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
         println!("ADDR={addr}");
     }
 
-    // Accept exactly one connection for the baseline run.
+    // Accept exactly one connection for the baseline run. t_conn is taken
+    // before waiting for the incoming connection so the acceptor's
+    // time_to_direct_ms covers connection start to direct selection, on the
+    // same footing as the dialer's dial-start origin; t_start below measures
+    // the transfer itself.
+    let t_conn = Instant::now();
     let conn = endpoint
         .accept()
         .await
@@ -101,8 +107,8 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
         .await
         .context("accept failed")?;
 
+    println!("CONNECTED_AT_MS={}", t_conn.elapsed().as_millis());
     let t_start = Instant::now();
-    println!("CONNECTED_AT_MS={}", t_start.elapsed().as_millis());
 
     // Watch path events from before the echo transfer starts, so a
     // relay -> direct migration during the transfer is observed.
@@ -122,7 +128,7 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
                         let mut t = telemetry.lock().unwrap();
                         t.last_selected_is_relay = remote_addr.is_relay();
                         if !remote_addr.is_relay() && t.first_direct.is_none() {
-                            t.first_direct = Some(t_start.elapsed());
+                            t.first_direct = Some(t_conn.elapsed());
                         }
                         tracing::info!(addr = %remote_addr, "path selected");
                     }
@@ -137,15 +143,17 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
 
     // The direct path can already be selected when accept completes, before
     // the event stream is subscribed. Seed both the first observation and
-    // the last-selected kind from the live snapshot, so a later close with
-    // no selected path does not fall back to the initial "relay" guess.
+    // the last-selected kind from the live snapshot (timed from t_conn, so
+    // a selection during the incoming handshake is not recorded as ~0 ms),
+    // so a later close with no selected path does not fall back to the
+    // initial "relay" guess either.
     {
         let paths = conn.paths();
         if let Some(p) = paths.iter().find(|p| p.is_selected()) {
             let mut t = telemetry.lock().unwrap();
             t.last_selected_is_relay = p.is_relay();
             if !p.is_relay() && t.first_direct.is_none() {
-                t.first_direct = Some(t_start.elapsed());
+                t.first_direct = Some(t_conn.elapsed());
             }
         }
     }
@@ -268,6 +276,7 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
     let mut result = common::new_result(
         run_id.unwrap_or_else(|| format!("baseline-accept-{}", run_suffix())),
         "baseline",
+        "acceptor",
         network_profile,
     );
     result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
@@ -277,6 +286,7 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
     } else {
         SelectedPath::DirectIp
     });
+    result.direct_path_rtt_ms = selected_rtt.map(|d| d.as_millis() as u64);
     result.payload_bytes = echoed;
     // A failed transfer reports partial payload_bytes (how far it got) but no
     // throughput: the elapsed time of an aborted run does not measure the

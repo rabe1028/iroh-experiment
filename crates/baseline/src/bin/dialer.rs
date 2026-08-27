@@ -72,6 +72,7 @@ fn main() -> Result<()> {
             let mut r = new_result(
                 format!("baseline-{}", run_suffix()),
                 "baseline",
+                "dialer",
                 &args.network_profile,
             );
             r.failure_reason = Some(format!("{e:#}"));
@@ -102,7 +103,7 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
             // A connect failure happens before any direct path can exist, so
             // a fresh result (direct_connection_success = false) is correct.
             endpoint.close().await;
-            let mut r = new_result(run_id, "baseline", &args.network_profile);
+            let mut r = new_result(run_id, "baseline", "dialer", &args.network_profile);
             r.failure_reason = Some(format!("connect failed: {e:#}"));
             return Ok(r);
         }
@@ -210,7 +211,7 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
         println!("TIME_TO_DIRECT_MS={}", ms.as_millis());
     }
 
-    let mut result = new_result(run_id, "baseline", &args.network_profile);
+    let mut result = new_result(run_id, "baseline", "dialer", &args.network_profile);
     // A direct path may be established and later lost before sampling;
     // success means a direct path was observed at any point in the run.
     result.direct_connection_success = first_direct.is_some() || selected_is_relay == Some(false);
@@ -220,6 +221,7 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     } else {
         SelectedPath::DirectIp
     });
+    result.direct_path_rtt_ms = selected_rtt.map(|d| d.as_millis() as u64);
     result.payload_bytes = payload_bytes;
     // A failed transfer reports partial payload_bytes (how far it got) but no
     // throughput: the elapsed time of an aborted run does not measure the

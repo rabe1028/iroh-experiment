@@ -35,6 +35,10 @@ pub enum SelectedPath {
 pub struct ExperimentResult {
     pub schema_version: u32,
     pub run_id: String,
+    /// Which endpoint of the pair produced this row ("acceptor" = Endpoint A
+    /// LAN gateway role, "dialer" = Endpoint B remote client role). One run
+    /// appends one row per endpoint under a shared run_id.
+    pub endpoint_role: String,
     #[serde(with = "rfc3339")]
     pub timestamp: SystemTime,
     pub git_revision: Option<String>,
@@ -50,6 +54,9 @@ pub struct ExperimentResult {
     pub direct_connection_success: bool,
     pub time_to_direct_ms: Option<u64>,
     pub selected_path: Option<SelectedPath>,
+    /// RTT of the selected path at the end of the run (plan section 10.2
+    /// `direct_path_rtt_ms`); null when no path was selected.
+    pub direct_path_rtt_ms: Option<u64>,
     // --- relay traffic (measured from PR 3/6 onwards) ---
     pub relay_control_tx_bytes: Option<u64>,
     pub relay_control_rx_bytes: Option<u64>,
@@ -67,11 +74,13 @@ pub struct ExperimentResult {
 pub fn new_result(
     run_id: impl Into<String>,
     method: &str,
+    endpoint_role: &str,
     network_profile: &str,
 ) -> ExperimentResult {
     ExperimentResult {
         schema_version: 1,
         run_id: run_id.into(),
+        endpoint_role: endpoint_role.to_string(),
         timestamp: SystemTime::now(),
         git_revision: None,
         iroh_version: "1.0.3".to_string(),
@@ -84,6 +93,7 @@ pub fn new_result(
         direct_connection_success: false,
         time_to_direct_ms: None,
         selected_path: None,
+        direct_path_rtt_ms: None,
         relay_control_tx_bytes: None,
         relay_control_rx_bytes: None,
         relay_media_tx_bytes: None,

@@ -981,6 +981,7 @@ Fly egress bytes
 {
   "schema_version": 1,
   "run_id": "synthetic-n2-stun-0001",
+  "endpoint_role": "dialer",
   "timestamp": "2026-08-23T00:00:00Z",
   "git_revision": "0000000",
   "iroh_version": "1.0.3",
@@ -993,6 +994,7 @@ Fly egress bytes
   "direct_connection_success": true,
   "time_to_direct_ms": 418,
   "selected_path": "direct-ip",
+  "direct_path_rtt_ms": 12,
   "relay_control_tx_bytes": 2048,
   "relay_control_rx_bytes": 4096,
   "relay_media_tx_bytes": 0,
