@@ -21,8 +21,15 @@ use cloudflare_stun::probe::{self, ProbeConfig};
 
 #[derive(Parser)]
 struct Args {
-    /// STUN servers to try, in order. Defaults to the plan E2 list.
-    #[arg(long = "server", default_value = "stun.cloudflare.com:3478")]
+    /// STUN servers to try, in order. Defaults to the plan E2 list:
+    /// UDP 3478 first, then UDP 53 as the fallback for N7.
+    #[arg(
+        long = "server",
+        default_values_t = [
+            "stun.cloudflare.com:3478".to_string(),
+            "stun.cloudflare.com:53".to_string()
+        ]
+    )]
     servers: Vec<String>,
     /// Milliseconds to wait per attempt.
     #[arg(long, default_value_t = 2000)]
@@ -63,14 +70,21 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Bind a UDP socket restricted to one family; a v4 socket cannot send to
+/// v6 targets and vice versa.
+fn bind_family(is_v4: bool) -> Result<tokio::net::UdpSocket> {
+    let std_sock = if is_v4 {
+        UdpSocket::bind("0.0.0.0:0")
+    } else {
+        UdpSocket::bind("[::]:0")
+    }
+    .context("binding probe socket")?;
+    tokio::net::UdpSocket::from_std(std_sock).context("async socket")
+}
+
 /// Probe one server from a dedicated ephemeral socket.
 fn probe_server(runtime: &tokio::runtime::Runtime, args: &Args, server: &str) -> Result<String> {
     runtime.block_on(async {
-        let std_sock = UdpSocket::bind("[::]:0")
-            .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
-            .context("binding probe socket")?;
-        let socket = tokio::net::UdpSocket::from_std(std_sock).context("async socket")?;
-
         let addrs = probe::resolve(server).context("resolving server")?;
         anyhow::ensure!(!addrs.is_empty(), "no addresses for {server}");
 
@@ -78,15 +92,35 @@ fn probe_server(runtime: &tokio::runtime::Runtime, args: &Args, server: &str) ->
             attempt_timeout: std::time::Duration::from_millis(args.attempt_timeout_ms),
             attempts: args.attempts,
         };
-        // A v4-bound socket cannot send to v6 targets and vice versa.
-        let local_is_v4 = socket.local_addr().map(|l| l.is_ipv4()).unwrap_or(true);
 
+        // Keep one socket per family, created when the candidate family
+        // changes. Binding [::]:0 succeeds even on hosts without an IPv6
+        // route, so filtering candidates by the first socket's family would
+        // skip every IPv4 address there and then fail all IPv6 probes for
+        // lack of a route; instead each family gets its own socket and the
+        // v4 candidates are still tried after IPv6 proves unusable.
+        let mut cur: Option<(bool, tokio::net::UdpSocket)> = None;
         let mut last_err = None;
         for addr in addrs {
-            if local_is_v4 != addr.is_ipv4() {
-                continue;
+            if cur
+                .as_ref()
+                .is_none_or(|(is_v4, _)| *is_v4 != addr.is_ipv4())
+            {
+                match bind_family(addr.is_ipv4()) {
+                    Ok(s) => cur = Some((addr.is_ipv4(), s)),
+                    Err(e) => {
+                        tracing::warn!(
+                            family = if addr.is_ipv4() { "v4" } else { "v6" },
+                            error = %e,
+                            "binding probe socket failed"
+                        );
+                        last_err = Some(e);
+                        continue;
+                    }
+                }
             }
-            match probe::probe(&socket, addr, &config).await {
+            let socket = &cur.as_ref().expect("socket was just bound").1;
+            match probe::probe(socket, addr, &config).await {
                 Ok(obs) => {
                     return Ok(serde_json::json!({
                         "method": obs.method,
