@@ -261,15 +261,23 @@ where
 ///
 /// Generic over the stream type so tests can run it against in-memory
 /// transports instead of live iroh connections.
+/// Upper bound for reading a tunnel request. A stream that sends only part
+/// of the request must not park the serving task indefinitely.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub async fn serve_stream<S>(stream: &mut S, services: &ServiceMap) -> Result<TunnelStatus>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let service_id = match read_request(stream).await {
-        Ok(id) => id,
-        Err(e) => {
+    let service_id = match tokio::time::timeout(REQUEST_TIMEOUT, read_request(stream)).await {
+        Ok(Ok(id)) => id,
+        Ok(Err(e)) => {
             let _ = send_terminal_status(stream, TunnelStatus::BadRequest).await;
             return Err(e.context("malformed tunnel request"));
+        }
+        Err(_) => {
+            let _ = send_terminal_status(stream, TunnelStatus::BadRequest).await;
+            return Err(anyhow::anyhow!("tunnel request timed out"));
         }
     };
 

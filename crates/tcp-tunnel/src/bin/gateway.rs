@@ -5,6 +5,8 @@
 //! `--service name=host:port` are routable; everything else is rejected, so
 //! the gateway is not an open proxy (plan E6 / PR 2).
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use tcp_tunnel::{ServiceMap, StreamPair, TUNNEL_ALPN};
@@ -14,10 +16,12 @@ struct Args {
     /// Routable service, as `name=host:port`. Repeat for multiple services.
     #[arg(long = "service")]
     services: Vec<String>,
-    /// EndpointId allowed to open tunnels (hex). Repeat for several peers.
+    /// Access rule for a remote endpoint, as `ID` (all configured services)
+    /// or `ID=SERVICE` (that service only). Repeat for several rules; the
+    /// plan section 19 authorization boundary is EndpointId x ServiceId.
     /// Omit to allow any endpoint (fine for local experiments only).
-    #[arg(long = "allow-endpoint")]
-    allow_endpoints: Vec<String>,
+    #[arg(long = "allow-endpoint", value_name = "ID[=SERVICE]")]
+    allow_rules: Vec<String>,
     /// File holding the gateway's 32-byte secret key, created with a fresh
     /// key on first use (0600). Without it every restart mints a new
     /// EndpointId while clients keep dialing the old one, so the advertised
@@ -40,17 +44,46 @@ fn main() -> Result<()> {
         println!("SERVICE={spec}");
     }
 
-    let allow: Vec<iroh::EndpointId> = args
-        .allow_endpoints
+    let allow: Vec<AllowRule> = args
+        .allow_rules
         .iter()
-        .map(|s| s.parse().context("invalid EndpointId in --allow-endpoint"))
+        .map(|s| parse_allow_rule(s))
         .collect::<Result<_>>()?;
     if allow.is_empty() {
         println!("AUTHORIZATION=any-endpoint (no --allow-endpoint configured)");
+    } else {
+        for rule in &allow {
+            match &rule.service {
+                Some(service) => println!("AUTHORIZATION={}={service}", rule.endpoint),
+                None => println!("AUTHORIZATION={}", rule.endpoint),
+            }
+        }
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(run(&services, &allow, args.key_file.as_deref()))
+}
+
+/// One access rule parsed from `ID` or `ID=SERVICE`.
+#[derive(Clone)]
+struct AllowRule {
+    endpoint: iroh::EndpointId,
+    /// None = every configured service.
+    service: Option<String>,
+}
+
+fn parse_allow_rule(raw: &str) -> Result<AllowRule> {
+    if let Some((id, service)) = raw.split_once('=') {
+        Ok(AllowRule {
+            endpoint: id.parse().with_context(|| format!("invalid EndpointId in {raw:?}"))?,
+            service: Some(service.to_string()),
+        })
+    } else {
+        Ok(AllowRule {
+            endpoint: raw.parse().with_context(|| format!("invalid EndpointId in {raw:?}"))?,
+            service: None,
+        })
+    }
 }
 
 /// Load the gateway's secret key from `path`, creating it (with parent
@@ -112,7 +145,7 @@ fn restrict_key_permissions(_path: &std::path::Path) -> Result<()> {
 
 async fn run(
     services: &ServiceMap,
-    allow: &[iroh::EndpointId],
+    allow: &[AllowRule],
     key_file: Option<&std::path::Path>,
 ) -> Result<()> {
     let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0);
@@ -130,61 +163,99 @@ async fn run(
         println!("ADDR={addr}");
     }
 
+    // Each connection completes its handshake concurrently and bounded, so
+    // one peer that stops mid-handshake cannot starve later clients.
+    const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    let services = Arc::new(services.clone());
+    let allow = Arc::new(allow.to_vec());
     while let Some(incoming) = endpoint.accept().await {
-        match incoming.accept() {
-            Ok(connecting) => match connecting.await {
-                Ok(conn) => {
-                    if !authorized(&conn, allow) {
-                        // Read the request just far enough to answer with the
-                        // protocol's Unauthorized status instead of a bare
-                        // close, then drop the connection. Bounded: a peer
-                        // that completes the handshake but never opens a
-                        // stream (or sends a partial request) must not park
-                        // this task and connection forever.
-                        const REJECT_TIMEOUT: std::time::Duration =
-                            std::time::Duration::from_secs(10);
-                        tokio::spawn(async move {
-                            let attempt = async {
-                                let (send, recv) = conn.accept_bi().await?;
-                                let mut pair = StreamPair::new(send, recv);
-                                tcp_tunnel::read_request(&mut pair).await?;
-                                Ok::<_, anyhow::Error>(pair)
-                            };
-                            match tokio::time::timeout(REJECT_TIMEOUT, attempt).await {
-                                Ok(Ok(mut pair)) => {
-                                    let _ = tcp_tunnel::send_terminal_status(
-                                        &mut pair,
-                                        tcp_tunnel::TunnelStatus::Unauthorized,
-                                    )
-                                    .await;
-                                }
-                                _ => {
-                                    // Timeout, refusal, or malformed request:
-                                    // close instead of lingering.
-                                    conn.close(1u32.into(), b"unauthorized");
-                                }
-                            }
-                        });
-                        continue;
-                    }
-                    tokio::spawn(serve_connection(conn, services.clone()));
-                }
-                Err(e) => tracing::warn!(error = %e, "handshake failed"),
-            },
-            Err(e) => tracing::warn!(error = %e, "incoming rejected"),
-        }
+        let Ok(connecting) = incoming.accept() else {
+            tracing::warn!("incoming rejected");
+            continue;
+        };
+        let services = Arc::clone(&services);
+        let allow = Arc::clone(&allow);
+        tokio::spawn(async move {
+            match tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting).await {
+                Ok(Ok(conn)) => handle_connection(conn, &services, &allow),
+                Ok(Err(e)) => tracing::warn!(error = %e, "handshake failed"),
+                Err(_) => tracing::warn!("handshake timed out"),
+            }
+        });
     }
     Ok(())
 }
 
-/// Reject connections from endpoints outside the allowlist.
-fn authorized(conn: &iroh::endpoint::Connection, allow: &[iroh::EndpointId]) -> bool {
+/// Authorize one connection and serve it with its scoped service map.
+fn handle_connection(conn: iroh::endpoint::Connection, services: &ServiceMap, allow: &[AllowRule]) {
+    let scoped = connection_scope(&conn, allow, services);
+    let Some(scoped) = scoped else {
+        // Read the request just far enough to answer with the protocol's
+        // Unauthorized status instead of a bare close, then drop the
+        // connection. Bounded: a peer that completes the handshake but never
+        // opens a stream (or sends a partial request) must not park this
+        // task and connection forever.
+        const REJECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        tokio::spawn(async move {
+            let attempt = async {
+                let (send, recv) = conn.accept_bi().await?;
+                let mut pair = StreamPair::new(send, recv);
+                tcp_tunnel::read_request(&mut pair).await?;
+                Ok::<_, anyhow::Error>(pair)
+            };
+            match tokio::time::timeout(REJECT_TIMEOUT, attempt).await {
+                Ok(Ok(mut pair)) => {
+                    let _ = tcp_tunnel::send_terminal_status(
+                        &mut pair,
+                        tcp_tunnel::TunnelStatus::Unauthorized,
+                    )
+                    .await;
+                }
+                _ => {
+                    // Timeout, refusal, or malformed request: close instead
+                    // of lingering.
+                    conn.close(1u32.into(), b"unauthorized");
+                }
+            }
+        });
+        return;
+    };
+    tokio::spawn(serve_connection(conn, scoped));
+}
+
+/// Services the connecting endpoint may request (plan section 19:
+/// EndpointId x ServiceId). `None` rejects the connection; an empty map
+/// accepts the connection but no service.
+fn connection_scope(
+    conn: &iroh::endpoint::Connection,
+    allow: &[AllowRule],
+    services: &ServiceMap,
+) -> Option<ServiceMap> {
     let remote = conn.remote_id();
-    if allow.is_empty() || allow.contains(&remote) {
-        true
+    if allow.is_empty() {
+        return Some(services.clone());
+    }
+    let mut scoped = ServiceMap::default();
+    let mut matched = false;
+    for rule in allow {
+        if rule.endpoint != remote {
+            continue;
+        }
+        matched = true;
+        match &rule.service {
+            None => return Some(services.clone()),
+            Some(name) => {
+                if let Some(addr) = services.get(name) {
+                    scoped.insert_spec(&format!("{name}={addr}")).ok()?;
+                }
+            }
+        }
+    }
+    if matched {
+        Some(scoped)
     } else {
         tracing::warn!(endpoint = %remote, "unauthorized endpoint rejected");
-        false
+        None
     }
 }
 
