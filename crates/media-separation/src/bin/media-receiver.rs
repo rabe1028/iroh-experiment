@@ -30,6 +30,14 @@ struct Args {
     /// Candidate time-to-live advertised to the sender.
     #[arg(long, default_value_t = 30_000)]
     candidate_ttl_ms: u64,
+    /// Externally reachable address to advertise in addition to the local
+    /// interface addresses (repeatable). The local candidates alone are
+    /// private/interface addresses, so a sender outside the receiver's LAN
+    /// cannot dial them; supply e.g. the media endpoint's port behind a NAT
+    /// static mapping, or the address a STUN probe observed for this host
+    /// (use the media endpoint's port if the mapping preserves it).
+    #[arg(long = "advertise-addr")]
+    advertise_addrs: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -110,7 +118,7 @@ async fn run(
         .context("control connect failed")?;
 
     const EPOCH: u64 = 0;
-    let cands: Vec<DirectCandidate> = addrs
+    let mut cands: Vec<DirectCandidate> = addrs
         .iter()
         .map(|addr| {
             DirectCandidate::local(
@@ -121,6 +129,18 @@ async fn run(
             )
         })
         .collect();
+    for raw in &args.advertise_addrs {
+        let addr: std::net::SocketAddr = raw
+            .parse()
+            .with_context(|| format!("invalid --advertise-addr {raw}"))?;
+        tracing::info!(addr = %addr, "advertising manual candidate");
+        cands.push(DirectCandidate::manual(
+            pair.media.id(),
+            addr,
+            Duration::from_millis(args.candidate_ttl_ms),
+            EPOCH,
+        ));
+    }
 
     let (mut ctl_send, mut ctl_recv) = control_conn.accept_bi().await?;
     media_separation::serve_candidates(&mut ctl_recv, &mut ctl_send, &cands)

@@ -89,6 +89,26 @@ impl DirectCandidate {
         }
     }
 
+    /// Build a manually supplied, externally reachable candidate valid for
+    /// `ttl`.
+    ///
+    /// The local candidates from the media endpoint cover only the receiver's
+    /// own interfaces (mostly private addresses); a sender outside the LAN
+    /// needs an externally reachable address — e.g. the media port behind a
+    /// NAT static mapping, or the mapping a STUN probe observed — supplied
+    /// by the operator until the discovery chain (plan E4) automates it.
+    pub fn manual(endpoint_id: EndpointId, addr: SocketAddr, ttl: Duration, epoch: u64) -> Self {
+        let now_ms = unix_millis();
+        Self {
+            endpoint_id,
+            addr,
+            source: CandidateSource::Manual,
+            observed_at_unix_ms: now_ms,
+            expires_at_unix_ms: now_ms + ttl.as_millis() as u64,
+            network_epoch: epoch,
+        }
+    }
+
     pub fn is_expired(&self, now_unix_ms: u64) -> bool {
         now_unix_ms >= self.expires_at_unix_ms
     }
