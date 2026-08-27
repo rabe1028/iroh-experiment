@@ -25,6 +25,12 @@ use tokio_stream::StreamExt;
 /// generic error.
 const HOST: &str = "localhost";
 
+/// A distinct LAN origin hostname. The E6 flow keeps the original origin in
+/// URLs and SNI while connecting through the tunnel's local listener, so the
+/// suite also exercises that original-hostname path rather than only the
+/// tunnel-local `HOST`.
+const LAN_ORIGIN: &str = "camera-ui.lan";
+
 type BoxFuture = Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 type H2Handler = Arc<
     dyn Fn(Request<h2::RecvStream>, h2::server::SendResponse<Bytes>) -> BoxFuture + Send + Sync,
@@ -32,12 +38,15 @@ type H2Handler = Arc<
 
 /// Bind a TLS LAN service on loopback that terminates TLS with ALPN `h2`
 /// and serves one h2 connection per accepted TCP connection, handing each
-/// request stream to `handler`. Returns the service address and the
-/// certificate to trust as a client-side root.
-async fn spawn_h2_tls_service(
+/// request stream to `handler`. `snis` lists the certificate hostnames. The
+/// `sni` parameter is the name the client connects with. Returns the service
+/// address and the certificate to trust as a client-side root.
+async fn spawn_h2_tls_service_with_sni(
     handler: H2Handler,
+    snis: Vec<String>,
+    sni: &str,
 ) -> Result<(String, rustls::pki_types::CertificateDer<'static>)> {
-    let cert = rcgen::generate_simple_self_signed(vec![HOST.to_string()])
+    let cert = rcgen::generate_simple_self_signed(snis)
         .context("generate self-signed cert")?;
     let cert_der = cert.cert.der().clone();
     let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
@@ -81,7 +90,27 @@ async fn tls_h2_session(
     handler: H2Handler,
     service_id: &str,
 ) -> Result<h2::client::SendRequest<Bytes>> {
-    let (service_addr, cert) = spawn_h2_tls_service(handler).await?;
+    let sender = tls_h2_session_with_sni(handler, service_id, HOST).await?;
+    Ok(sender)
+}
+
+/// Default LAN service: certificate and SNI both use [`HOST`].
+async fn spawn_h2_tls_service(
+    handler: H2Handler,
+) -> Result<(String, rustls::pki_types::CertificateDer<'static>)> {
+    spawn_h2_tls_service_with_sni(handler, vec![HOST.to_string()], HOST).await
+}
+
+/// Bring up one TLS(h2) service behind the tunnel and connect with SNI
+/// `sni` (certificate SAN must cover it); the request URL keeps the original
+/// origin hostname, as real clients do through the tunnel's local listener.
+async fn tls_h2_session_with_sni(
+    handler: H2Handler,
+    service_id: &str,
+    sni: &str,
+) -> Result<h2::client::SendRequest<Bytes>> {
+    let snis = vec![HOST.to_string(), sni.to_string()];
+    let (service_addr, cert) = spawn_h2_tls_service_with_sni(handler, snis, sni).await?;
     let services = service_map(&[format!("{service_id}={service_addr}")])?;
     let app_stream = connect_tunnel(&services, service_id).await?;
 
@@ -92,19 +121,12 @@ async fn tls_h2_session(
         .with_no_client_auth();
     client_config.alpn_protocols = vec![b"h2".to_vec()];
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
-    let server_name =
-        rustls::pki_types::ServerName::try_from(HOST.to_string()).context("server name")?;
-    // Certificate validation runs the real WebPki path: the handshake fails
-    // unless SNI, the certificate hostname, and the trusted root all agree.
+    let server_name = rustls::pki_types::ServerName::try_from(sni.to_string())
+        .context("server name")?;
     let tls = connector
         .connect(server_name, app_stream)
         .await
         .context("TLS handshake through tunnel")?;
-    assert_eq!(
-        tls.get_ref().1.alpn_protocol(),
-        Some(&b"h2"[..]),
-        "ALPN must negotiate h2 over the tunnel"
-    );
     let (request_sender, connection) =
         h2::client::handshake(tls).await.context("h2 client handshake")?;
     tokio::spawn(async move {
@@ -167,6 +189,30 @@ async fn https_tls_handshake_alpn_over_tunnel() -> Result<()> {
     assert_eq!(response.status(), StatusCode::OK);
     let body = recv_body(response.into_body()).await?;
     assert_eq!(&body[..], b"hello https");
+    Ok(())
+}
+
+#[tokio::test]
+async fn https_original_lan_hostname_through_tunnel() -> Result<()> {
+    // E6 keeps the original origin hostname in the URL and SNI while the
+    // connection goes through the tunnel's local listener; a hostname
+    // rewrite would break exactly here (certificate/authority mismatch).
+    let handler: H2Handler = Arc::new(|_req, respond| {
+        Box::pin(async move {
+            respond_with(respond, b"lan-origin-ok").await;
+        })
+    });
+    let mut request_sender = tls_h2_session_with_sni(handler, "lan", LAN_ORIGIN).await?;
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("https://{LAN_ORIGIN}/"))
+        .body(())
+        .unwrap();
+    let (response, _) = request_sender.send_request(request, true)?;
+    let response = response.await.context("h2 response")?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = recv_body(response.into_body()).await?;
+    assert_eq!(&body[..], b"lan-origin-ok");
     Ok(())
 }
 

@@ -265,6 +265,10 @@ where
 /// of the request must not park the serving task indefinitely.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Upper bound for dialing the LAN upstream. A target that silently drops
+/// SYNs (or a stalled resolver) must not leave the client without a status.
+const UPSTREAM_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub async fn serve_stream<S>(stream: &mut S, services: &ServiceMap) -> Result<TunnelStatus>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -287,12 +291,18 @@ where
         return Ok(TunnelStatus::UnknownService);
     };
 
-    let mut up = match TcpStream::connect(&target).await {
-        Ok(up) => up,
-        Err(e) => {
+    let mut up = match tokio::time::timeout(UPSTREAM_DIAL_TIMEOUT, TcpStream::connect(&target)).await
+    {
+        Ok(Ok(up)) => up,
+        Ok(Err(e)) => {
             tracing::warn!(service = %service_id, target = %target, "upstream dial failed");
             send_terminal_status(stream, TunnelStatus::UpstreamUnreachable).await?;
             return Err(anyhow::Error::new(e)).with_context(|| format!("dial upstream {target}"));
+        }
+        Err(_) => {
+            tracing::warn!(service = %service_id, target = %target, "upstream dial timed out");
+            send_terminal_status(stream, TunnelStatus::UpstreamUnreachable).await?;
+            return Err(anyhow::anyhow!("dial upstream {target} timed out"));
         }
     };
 
