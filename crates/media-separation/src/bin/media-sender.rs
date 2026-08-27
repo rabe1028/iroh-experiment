@@ -56,6 +56,10 @@ fn main() -> Result<()> {
         Ok((outcome, gate_state)) => {
             result.direct_connection_success = outcome.direct_connection_success;
             result.time_to_direct_ms = outcome.time_to_direct_ms;
+            // A successful run streamed only under a direct-selected gate.
+            if outcome.direct_connection_success {
+                result.selected_path = Some(common::SelectedPath::DirectIp);
+            }
             result.payload_bytes = outcome.stream.payload_bytes;
             result.media_throughput_mbps = outcome.stream.throughput_mbps();
             result.relay_media_tx_bytes = outcome.relay_media_bytes;

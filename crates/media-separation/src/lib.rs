@@ -114,11 +114,16 @@ impl DirectCandidate {
         // to the receiver's wall clock: comparing a receiver-built
         // expires_at against the sender's clock rejects every fresh
         // candidate whenever the sender runs behind by more than the
-        // transfer delay of the candidate exchange.
+        // transfer delay of the candidate exchange. The elapsed time is
+        // still measured on the sender's clock, so a small skew slack is
+        // subtracted; host clocks must be within TTL - EXPIRY_SKEW_SLACK
+        // of each other (NTP-normal hosts are off by well under a second).
+        const EXPIRY_SKEW_SLACK_MS: u64 = 10_000;
         let ttl = self
             .expires_at_unix_ms
             .saturating_sub(self.observed_at_unix_ms);
-        now_unix_ms.saturating_sub(self.observed_at_unix_ms) >= ttl
+        let slack = EXPIRY_SKEW_SLACK_MS.min(ttl);
+        now_unix_ms.saturating_sub(self.observed_at_unix_ms) >= ttl + slack
     }
 }
 

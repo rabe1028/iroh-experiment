@@ -60,6 +60,10 @@ fn main() -> Result<()> {
         Ok((outcome, gate_state)) => {
             result.direct_connection_success = outcome.direct_connection_success;
             result.time_to_direct_ms = outcome.time_to_direct_ms;
+            // A successful run streamed only under a direct-selected gate.
+            if outcome.direct_connection_success {
+                result.selected_path = Some(common::SelectedPath::DirectIp);
+            }
             result.payload_bytes = outcome.stream.payload_bytes;
             result.media_throughput_mbps = outcome.stream.throughput_mbps();
             result.relay_media_rx_bytes = outcome.relay_media_bytes;
@@ -100,11 +104,6 @@ async fn run(
 
     println!("CONTROL_EP_ID={}", pair.control.id());
     println!("MEDIA_EP_ID={}", pair.media.id());
-    let addrs = pair.media_direct_addrs();
-    for addr in &addrs {
-        println!("MEDIA_ADDR={addr}");
-    }
-    anyhow::ensure!(!addrs.is_empty(), "media endpoint has no direct addresses");
 
     // Accept the control connection and publish candidates on it.
     let control_conn = pair
@@ -116,6 +115,15 @@ async fn run(
         .context("control incoming rejected")?
         .await
         .context("control connect failed")?;
+
+    // Snapshot the media addresses only now, right before advertising: an
+    // interface change while waiting for the dialer must not publish stale
+    // pre-wait addresses stamped as freshly observed for the whole TTL.
+    let addrs = pair.media_direct_addrs();
+    for addr in &addrs {
+        println!("MEDIA_ADDR={addr}");
+    }
+    anyhow::ensure!(!addrs.is_empty(), "media endpoint has no direct addresses");
 
     const EPOCH: u64 = 0;
     let mut cands: Vec<DirectCandidate> = addrs
