@@ -30,11 +30,15 @@ const RUN_ID_MAX_BYTES: usize = 1024;
 const PEER_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared telemetry snapshot written by the path-event watcher task.
-#[derive(Default)]
 struct PathTelemetry {
     first_direct: Option<Duration>,
     /// Whether the most recent `Selected` event chose a relay path.
     last_selected_is_relay: bool,
+    /// Whether a direct path was observed at any point, including one
+    /// seeded from the live snapshot before the event subscription. A later
+    /// relay fallback overwrites `last_selected_is_relay` but must not erase
+    /// this.
+    direct_ever: bool,
 }
 
 #[derive(Parser)]
@@ -119,6 +123,7 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
     let telemetry = Arc::new(Mutex::new(PathTelemetry {
         first_direct: None,
         last_selected_is_relay: true,
+        direct_ever: false,
     }));
     let watcher = tokio::spawn({
         let telemetry = Arc::clone(&telemetry);
@@ -128,8 +133,11 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
                     PathEvent::Selected { remote_addr, .. } => {
                         let mut t = telemetry.lock().unwrap();
                         t.last_selected_is_relay = remote_addr.is_relay();
-                        if !remote_addr.is_relay() && t.first_direct.is_none() {
-                            t.first_direct = Some(t_start.elapsed());
+                        if !remote_addr.is_relay() {
+                            t.direct_ever = true;
+                            if t.first_direct.is_none() {
+                                t.first_direct = Some(t_start.elapsed());
+                            }
                         }
                         tracing::info!(addr = %remote_addr, "path selected");
                     }
@@ -143,15 +151,17 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
     });
 
     // The direct path can already be selected when accept completes, before
-    // the event stream is subscribed. Seed the last-selected kind from the
-    // live snapshot (so direct success is still recognized and a later close
-    // with no selected path does not fall back to the initial "relay"
-    // guess), but not first_direct: a selection before accept completed has
-    // no measurable origin on this side.
+    // the event stream is subscribed. Seed the last-selected kind and the
+    // ever-observed bit from the live snapshot, but not first_direct: a
+    // selection before accept completed has no measurable origin on this
+    // side. Keeping direct_ever separate preserves the success when a later
+    // relay event overwrites last_selected_is_relay.
     {
         let paths = conn.paths();
         if let Some(p) = paths.iter().find(|p| p.is_selected()) {
-            telemetry.lock().unwrap().last_selected_is_relay = p.is_relay();
+            let mut t = telemetry.lock().unwrap();
+            t.last_selected_is_relay = p.is_relay();
+            t.direct_ever |= !p.is_relay();
         }
     }
 
@@ -237,17 +247,17 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
 
     // Wait for the direct migration instead of a fixed sleep: a fixed window
     // would truncate observation on high-latency / lossy profiles and bias
-    // direct-success rates. Stop as soon as a direct path was selected, the
+    // direct-success rates. Stop as soon as a direct path was observed, the
     // connection closed, or the experiment-wide timeout expired.
-    let (first_direct, last_selected_is_relay) = loop {
+    let (first_direct, last_selected_is_relay, direct_ever) = loop {
         {
             let t = telemetry.lock().unwrap();
-            if !t.last_selected_is_relay
+            if t.direct_ever
                 || first_direct_ready(&t)
                 || conn.close_reason().is_some()
                 || t_start.elapsed() > DIRECT_MIGRATION_TIMEOUT
             {
-                break (t.first_direct, t.last_selected_is_relay);
+                break (t.first_direct, t.last_selected_is_relay, t.direct_ever);
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -276,7 +286,8 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
         "acceptor",
         network_profile,
     );
-    result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
+    result.direct_connection_success =
+        direct_ever || first_direct.is_some() || !selected_is_relay;
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {
         SelectedPath::Relay

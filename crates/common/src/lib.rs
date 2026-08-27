@@ -82,7 +82,7 @@ pub fn new_result(
         run_id: run_id.into(),
         endpoint_role: endpoint_role.to_string(),
         timestamp: SystemTime::now(),
-        git_revision: None,
+        git_revision: git_revision(),
         iroh_version: "1.0.3".to_string(),
         method: method.to_string(),
         network_profile: network_profile.to_string(),
@@ -123,6 +123,22 @@ mod rfc3339 {
         humantime::parse_rfc3339(&s)
             .map(|st| UNIX_EPOCH + st.duration_since(UNIX_EPOCH).unwrap_or_default())
             .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Short git revision of the working tree, recorded with each result row so
+/// published measurements tie back to the implementation that produced them.
+/// Null when run outside a git checkout.
+fn git_revision() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    let rev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !rev.is_empty() {
+        Some(rev)
+    } else {
+        None
     }
 }
 
