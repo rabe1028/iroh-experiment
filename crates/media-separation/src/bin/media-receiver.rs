@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use common::new_result;
-use media_separation::{DirectCandidate, EndpointPair, SyntheticConfig, CONTROL_ALPN, MEDIA_ALPN};
+use media_separation::{DirectCandidate, EndpointPair, CONTROL_ALPN, MEDIA_ALPN};
 
 #[derive(Parser)]
 struct Args {
@@ -127,8 +127,11 @@ async fn run(
         .await
         .context("serve candidates")?;
 
-    // Wait for the media connection on the direct-only endpoint.
+    // Wait for the media connection on the direct-only endpoint. The origin
+    // for time_to_direct_ms is taken before waiting, so the measurement
+    // covers accept start to direct-ready rather than the stream duration.
     tracing::info!("waiting for media connection");
+    let started_unix_ms = media_separation::unix_millis();
     let conn = tokio::time::timeout(Duration::from_secs(60), async {
         pair.media
             .accept()
@@ -142,12 +145,7 @@ async fn run(
     .await
     .context("timed out waiting for media connection")??;
 
-    let cfg = SyntheticConfig {
-        bitrate_bps: (args.bitrate_mbps * 1_000_000.0) as u64,
-        frame_payload_bytes: 1200,
-        duration: Duration::from_secs(args.duration_secs),
-    };
-    let (outcome, gate) = media_separation::run_receiver_session(conn, cfg).await?;
+    let (outcome, gate) = media_separation::run_receiver_session(conn, started_unix_ms).await?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }

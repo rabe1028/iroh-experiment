@@ -106,18 +106,35 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
     anyhow::ensure!(!cands.is_empty(), "receiver published no candidates");
 
     const KNOWN_EPOCH: u64 = 0;
-    let candidate = cands
+    // Validate every candidate from the known epoch and dial all of them:
+    // on a multi-homed receiver any single address may belong to an
+    // unreachable VPN, container, or interface, while a later advertised
+    // candidate is reachable. Putting all candidates into the EndpointAddr
+    // lets iroh race them instead of biasing direct results by candidate
+    // order.
+    let usable: Vec<&media_separation::DirectCandidate> = cands
         .iter()
-        .find(|c| !c.addr.ip().is_loopback() && c.network_epoch == KNOWN_EPOCH)
-        .or_else(|| cands.iter().find(|c| c.network_epoch == KNOWN_EPOCH))
-        .cloned()
-        .context("no candidate from a known epoch")?;
-    media_separation::validate_candidate(&candidate, [KNOWN_EPOCH])
-        .context("candidate rejected (fail-closed)")?;
-    tracing::info!(addr = %candidate.addr, "dialed media candidate");
+        .filter(|c| c.network_epoch == KNOWN_EPOCH)
+        .collect();
+    anyhow::ensure!(!usable.is_empty(), "no candidate from a known epoch");
+    for c in &usable {
+        media_separation::validate_candidate(c, [KNOWN_EPOCH])
+            .context("candidate rejected (fail-closed)")?;
+    }
+    let endpoint_id = usable[0].endpoint_id;
+    anyhow::ensure!(
+        usable.iter().all(|c| c.endpoint_id == endpoint_id),
+        "advertised candidates disagree on endpoint id"
+    );
+    for c in &usable {
+        tracing::info!(addr = %c.addr, source = ?c.source, "dialing media candidate");
+    }
 
     // --- media plane: direct-only dial ---
-    let media_addr = EndpointAddr::new(candidate.endpoint_id).with_ip_addr(candidate.addr);
+    let started_unix_ms = media_separation::unix_millis();
+    let media_addr = usable.iter().fold(EndpointAddr::new(endpoint_id), |a, c| {
+        a.with_ip_addr(c.addr)
+    });
     let conn = tokio::time::timeout(
         Duration::from_secs(30),
         pair.media.connect(media_addr, MEDIA_ALPN),
@@ -132,7 +149,7 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
         duration: Duration::from_secs(args.duration_secs),
     };
     let (outcome, gate): (_, Arc<Mutex<MediaGate>>) =
-        run_sender_session(conn, cfg, candidate.clone(), KNOWN_EPOCH).await?;
+        run_sender_session(conn, cfg, usable[0].clone(), KNOWN_EPOCH, started_unix_ms).await?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }

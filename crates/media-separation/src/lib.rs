@@ -116,7 +116,9 @@ pub fn validate_candidate(
     Ok(())
 }
 
-fn unix_millis() -> u64 {
+/// Current unix time in ms (public so bins and tests share one clock for
+/// session-origin timestamps).
+pub fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -313,6 +315,10 @@ pub enum PathSignal {
 pub struct MediaGate {
     tx: watch::Sender<GateState>,
     ever_had_direct: bool,
+    /// Unix-ms of the first transition into [`GateState::DirectReady`]; the
+    /// session reports this relative to its pre-dial/accept start so
+    /// time_to_direct_ms is not contaminated by the stream duration.
+    direct_ready_at_unix_ms: Option<u64>,
 }
 
 impl MediaGate {
@@ -321,11 +327,17 @@ impl MediaGate {
         Self {
             tx,
             ever_had_direct: false,
+            direct_ready_at_unix_ms: None,
         }
     }
 
     pub fn state(&self) -> GateState {
         *self.tx.borrow()
+    }
+
+    /// When the gate first became direct-ready, in unix ms.
+    pub fn direct_ready_at_unix_ms(&self) -> Option<u64> {
+        self.direct_ready_at_unix_ms
     }
 
     /// Watch channel receiving every state change.
@@ -359,6 +371,9 @@ impl MediaGate {
                     return self.stop(StopReason::DirectPathLost);
                 }
                 if selected_direct {
+                    if self.direct_ready_at_unix_ms.is_none() {
+                        self.direct_ready_at_unix_ms = Some(unix_millis());
+                    }
                     self.tx.send_replace(GateState::DirectReady);
                 } else if self.state() == GateState::DirectReady {
                     // Selection left the direct path without a close event
@@ -476,7 +491,13 @@ async fn monitor_loop(
             selected_direct,
         });
 
-        if matches!(lock_gate(gate).state(), GateState::Stopped(_)) {
+        if let GateState::Stopped(_) = lock_gate(gate).state() {
+            // The streaming task may be blocked in write_all on QUIC
+            // backpressure and cannot observe the latched gate until that
+            // write returns; close the connection so the fail-closed deadline
+            // is met by this transport reset instead of the transport
+            // timeout.
+            conn.close(1u32.into(), b"media gate stopped");
             break;
         }
         if *done_rx.borrow() {
@@ -809,14 +830,19 @@ where
 
         if let Err(e) = stream.write_all(&frame).await {
             if is_closed(&e) {
-                stats.stop_reason = Some(StopReason::ConnectionClosed);
+                // Prefer the gate's stop reason: the monitor closes the
+                // connection when it latches Stopped, so a closed stream here
+                // usually means the gate cut the session, not the peer.
+                stats.stop_reason =
+                    gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
                 return Ok(stats);
             }
             return Err(e.into());
         }
         if let Err(e) = stream.flush().await {
             if is_closed(&e) {
-                stats.stop_reason = Some(StopReason::ConnectionClosed);
+                stats.stop_reason =
+                    gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
                 return Ok(stats);
             }
             return Err(e.into());
@@ -874,13 +900,16 @@ pub struct SessionOutcome {
 
 /// Run the receiver half of a media session on an accepted media connection.
 ///
+/// `started_unix_ms` must be taken before waiting for the media connection,
+/// so `time_to_direct_ms` covers accept start to direct-ready instead of the
+/// stream duration.
+///
 /// Handshake: sender sends an empty request frame, receiver answers `ready`,
 /// then the synthetic stream flows receiver-ward until done or stopped.
 pub async fn run_receiver_session(
     conn: Connection,
-    _cfg: SyntheticConfig,
+    started_unix_ms: u64,
 ) -> Result<(SessionOutcome, Arc<Mutex<MediaGate>>)> {
-    let started = std::time::Instant::now();
     let gate = Arc::new(Mutex::new(MediaGate::new()));
     let state_rx = lock_gate(&gate).subscribe();
     let mut monitor = spawn_media_monitor(&conn, gate.clone());
@@ -898,12 +927,16 @@ pub async fn run_receiver_session(
     monitor.finished().await;
     let ever_relay = monitor.ever_relay_paths();
 
+    // Sampled from the latched direct-ready transition, not from elapsed()
+    // at outcome construction (a 10 s stream would otherwise report ~10 s
+    // regardless of when the direct path became ready).
+    let time_to_direct_ms = lock_gate(&gate)
+        .direct_ready_at_unix_ms()
+        .map(|t| t.saturating_sub(started_unix_ms));
     let outcome = SessionOutcome {
         role: MediaRole::Receiver,
         direct_connection_success: stats.frames > 0,
-        time_to_direct_ms: stats
-            .first_frame_unix_ms
-            .map(|_| started.elapsed().as_millis() as u64),
+        time_to_direct_ms,
         relay_media_bytes: 0,
         ever_relay_paths: ever_relay,
         stream: stats,
@@ -913,15 +946,18 @@ pub async fn run_receiver_session(
 
 /// Run the sender half of a media session on an already-dialed media
 /// connection towards `candidate` (validated first, fail-closed).
+///
+/// `started_unix_ms` must be taken before dialing the media connection (see
+/// [`run_receiver_session`]).
 pub async fn run_sender_session(
     conn: Connection,
     cfg: SyntheticConfig,
     candidate: DirectCandidate,
     known_epoch: u64,
+    started_unix_ms: u64,
 ) -> Result<(SessionOutcome, Arc<Mutex<MediaGate>>)> {
     validate_candidate(&candidate, [known_epoch])?;
 
-    let started = std::time::Instant::now();
     let gate = Arc::new(Mutex::new(MediaGate::new()));
     let state_rx = lock_gate(&gate).subscribe();
     let mut monitor = spawn_media_monitor(&conn, gate.clone());
@@ -939,12 +975,16 @@ pub async fn run_sender_session(
     monitor.finished().await;
     let ever_relay = monitor.ever_relay_paths();
 
+    // Sampled from the latched direct-ready transition, not from elapsed()
+    // at outcome construction (a 10 s stream would otherwise report ~10 s
+    // regardless of when the direct path became ready).
+    let time_to_direct_ms = lock_gate(&gate)
+        .direct_ready_at_unix_ms()
+        .map(|t| t.saturating_sub(started_unix_ms));
     let outcome = SessionOutcome {
         role: MediaRole::Sender,
         direct_connection_success: stats.frames > 0,
-        time_to_direct_ms: stats
-            .first_frame_unix_ms
-            .map(|_| started.elapsed().as_millis() as u64),
+        time_to_direct_ms,
         relay_media_bytes: 0,
         ever_relay_paths: ever_relay,
         stream: stats,
