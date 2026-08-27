@@ -926,6 +926,12 @@ where
         tokio::select! {
             _ = ticker.tick() => {}
             _ = state_rx.changed() => {}
+            // A frame interval longer than the remaining duration (sub-1 fps
+            // rates) must not delay completion until the next tick wakes the
+            // loop past the deadline.
+            _ = tokio::time::sleep_until(deadline) => {
+                break;
+            }
         }
         let state = *state_rx.borrow_and_update();
         if matches!(state, GateState::Stopped(_)) {
