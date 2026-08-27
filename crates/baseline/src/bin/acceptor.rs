@@ -176,16 +176,17 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
             match id {
                 Err(e) => failure = Some(format!("run id header read failed: {e:#}")),
                 Ok(id_buf) => {
+                    // Keep the parsed id even if echoing it fails: the two
+                    // failure rows can still be paired, since the id was
+                    // successfully received.
+                    run_id = Some(String::from_utf8_lossy(&id_buf).into_owned());
                     let echo_err = send.write_all(&len_buf).await.err();
                     let echo_err = match echo_err {
                         None => send.write_all(&id_buf).await.err(),
                         some => some,
                     };
-                    match echo_err {
-                        Some(e) => failure = Some(format!("run id echo failed: {e:#}")),
-                        None => {
-                            run_id = Some(String::from_utf8_lossy(&id_buf).into_owned());
-                        }
+                    if let Some(e) = echo_err {
+                        failure = Some(format!("run id echo failed: {e:#}"));
                     }
                 }
             }
@@ -213,7 +214,12 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
                     }
                 }
                 if failure.is_none() {
-                    send.finish()?;
+                    // A failed finish is a transfer failure, not a reason to
+                    // discard the accumulated telemetry (the run id, echoed
+                    // byte count, and path state stay in the result row).
+                    if let Err(e) = send.finish() {
+                        failure = Some(format!("send finish failed: {e:#}"));
+                    }
                 }
             }
         }

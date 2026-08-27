@@ -187,12 +187,14 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     watcher.abort();
 
     let stats = conn.stats();
-    // Extract owned values from the borrowed path snapshot.
+    // Extract owned values from the borrowed path snapshot. A transport
+    // failure can leave no selected path at the sampling instant; that is an
+    // unknown final path (null), not a relay fallback.
     let (selected_rtt, selected_is_relay) = {
         let paths = conn.paths();
         match paths.iter().find(|p| p.is_selected()) {
-            Some(p) => (Some(p.rtt()), p.is_relay()),
-            None => (None, true),
+            Some(p) => (Some(p.rtt()), Some(p.is_relay())),
+            None => (None, None),
         }
     };
 
@@ -211,9 +213,9 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     let mut result = new_result(run_id, "baseline", &args.network_profile);
     // A direct path may be established and later lost before sampling;
     // success means a direct path was observed at any point in the run.
-    result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
+    result.direct_connection_success = first_direct.is_some() || selected_is_relay == Some(false);
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
-    result.selected_path = Some(if selected_is_relay {
+    result.selected_path = selected_is_relay.map(|is_relay| if is_relay {
         SelectedPath::Relay
     } else {
         SelectedPath::DirectIp
