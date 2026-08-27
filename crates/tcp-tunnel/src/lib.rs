@@ -237,6 +237,18 @@ impl AsyncWrite for StreamPair {
     }
 }
 
+/// Send a terminal status and finish the write side so the client reliably
+/// reads it: with a real `StreamPair`, returning while the send side is
+/// unfinished drops an unfinished QUIC SendStream, which can reset the
+/// stream before the status is delivered.
+async fn send_terminal_status<S>(stream: &mut S, status: TunnelStatus) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    write_status(stream, status).await?;
+    stream.shutdown().await.context("finish write side after terminal status")
+}
+
 /// Gateway-side handler for one tunnelled stream.
 ///
 /// Reads the handshake, routes to the allowlisted upstream over TCP, then
@@ -252,14 +264,14 @@ where
     let service_id = match read_request(stream).await {
         Ok(id) => id,
         Err(e) => {
-            let _ = write_status(stream, TunnelStatus::BadRequest).await;
+            let _ = send_terminal_status(stream, TunnelStatus::BadRequest).await;
             return Err(e.context("malformed tunnel request"));
         }
     };
 
     let Some(target) = services.get(&service_id).map(str::to_owned) else {
         tracing::warn!(service = %service_id, "rejected unknown service");
-        write_status(stream, TunnelStatus::UnknownService).await?;
+        send_terminal_status(stream, TunnelStatus::UnknownService).await?;
         return Ok(TunnelStatus::UnknownService);
     };
 
@@ -267,7 +279,7 @@ where
         Ok(up) => up,
         Err(e) => {
             tracing::warn!(service = %service_id, target = %target, "upstream dial failed");
-            write_status(stream, TunnelStatus::UpstreamUnreachable).await?;
+            send_terminal_status(stream, TunnelStatus::UpstreamUnreachable).await?;
             return Err(anyhow::Error::new(e)).with_context(|| format!("dial upstream {target}"));
         }
     };

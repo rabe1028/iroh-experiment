@@ -60,6 +60,7 @@ fn main() -> Result<()> {
 fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
     match std::fs::read(path) {
         Ok(bytes) => {
+            restrict_key_permissions(path)?;
             iroh::SecretKey::try_from(bytes.as_slice()).context("parse gateway key file")
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -69,17 +70,44 @@ fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
                     std::fs::create_dir_all(parent).context("create key file parent")?;
                 }
             }
-            std::fs::write(path, key.to_bytes()).context("write gateway key file")?;
+            // Create owner-only up front: writing the raw key first and
+            // restricting later would leave a window where a 0644 file
+            // holds the private key.
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                    .context("restrict gateway key file permissions")?;
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                    .context("create gateway key file")?;
+                f.write_all(&key.to_bytes()).context("write gateway key file")?;
             }
+            #[cfg(not(unix))]
+            std::fs::write(path, key.to_bytes()).context("write gateway key file")?;
             Ok(key)
         }
         Err(e) => Err(e).context("read gateway key file"),
     }
+}
+
+/// Correct an existing key file that is readable beyond the owner.
+#[cfg(unix)]
+fn restrict_key_permissions(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::metadata(path).context("stat gateway key file")?.permissions();
+    if perms.mode() & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .context("restrict gateway key file permissions")?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_key_permissions(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
 
 async fn run(
