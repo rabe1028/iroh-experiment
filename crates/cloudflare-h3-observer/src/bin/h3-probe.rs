@@ -53,7 +53,10 @@ fn main() -> Result<()> {
     );
     match outcome {
         Ok((obs, comparison)) => {
-            result.reference_method = Some("cloudflare-h3".into());
+            // The comparison reference is the STUN probe; record it only
+            // when a comparison actually happened, so an un-referenced run
+            // does not claim one (plan E3).
+            result.reference_method = comparison.map(|_| "cloudflare-stun".to_string());
             result.observed_ip_equal = comparison.map(|c| {
                 matches!(
                     c,

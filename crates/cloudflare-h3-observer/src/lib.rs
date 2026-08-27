@@ -183,7 +183,18 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
             .and_then(|v: &HeaderValue| v.to_str().ok().map(str::to_owned))
     };
 
-    let observed_ip = header(HDR_OBSERVED_IP).and_then(|v| v.parse().ok());
+    // A 2xx without a parsable x-observed-ip means the zone's Worker route
+    // or Transform Rule is missing, misconfigured, or emitting garbage; the
+    // required observation did not happen, so this must fail the probe
+    // instead of silently reporting None (which STUN comparison treats as
+    // optional and would record as a successful run).
+    let raw_ip = header(HDR_OBSERVED_IP);
+    let observed_ip: Option<IpAddr> = Some(
+        raw_ip
+            .context("response lacks x-observed-ip; check zone config in infra/cloudflare/")?
+            .parse()
+            .context("x-observed-ip is not a valid IP address")?,
+    );
     let observed_port = header(HDR_OBSERVED_PORT).and_then(|v| v.parse().ok());
     let rtt_ms = header(HDR_OBSERVED_RTT_MS).and_then(|v| v.parse().ok());
     let colo = header(HDR_COLLO);
