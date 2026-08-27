@@ -169,6 +169,11 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
         .send_request(req)
         .await
         .context("send H3 request")?;
+    // HTTP/3 HEADERS do not end the request stream, and a GET may legally
+    // carry a body; a server that waits for the stream FIN before dispatching
+    // would otherwise deadlock this probe until its timeout. The request is
+    // empty, so finish it right away.
+    stream.finish().await.context("finish H3 request")?;
     let response = stream.recv_response().await.context("await H3 response")?;
     let status = response.status();
     anyhow::ensure!(
@@ -207,7 +212,6 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
             Err(_) => break,
         }
     }
-    stream.finish().await.ok();
 
     driver_task.abort();
 

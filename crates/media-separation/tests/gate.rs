@@ -119,7 +119,7 @@ fn stopped_ignores_everything() {
 }
 
 fn cand(ttl_ms: u64, epoch: u64) -> DirectCandidate {
-    let endpoint_id = iroh::SecretKey::generate().public().into();
+    let endpoint_id = iroh::SecretKey::generate().public();
     DirectCandidate::local(
         endpoint_id,
         "203.0.113.7:4001".parse().unwrap(),
