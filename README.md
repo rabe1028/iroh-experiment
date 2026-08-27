@@ -19,13 +19,16 @@ iroh Serverless NAT Traversal / Direct Media Path 実験のリポジトリ。
 ## 使い方 (E0 Baseline)
 
 ```sh
-cargo run --release --bin baseline-acceptor -- --results results/raw.example/e0.jsonl
+cargo run --release --bin baseline-acceptor -- \
+    --results results/raw.example/e0.jsonl --network-profile L0
 # 別ターミナル
 cargo run --release --bin baseline-dialer <ENDPOINT_ID> \
     --results results/raw.example/e0.jsonl --network-profile L0
 ```
 
 acceptorが `ENDPOINT_ID=...` を出力するのでdialerに渡す。
+dialerが生成したrun idがストリーム先頭に送られ、両プロセスの結果行が
+同じ `run_id` を持つため1実行の2行をペアリングできる。
 10 MiBのランダムデータを送りecho照合し、path telemetry
 (relay→direct移行時刻、selected path、RTT、UDP datagram数) を記録して
 結果を1行JSONで追記する。
