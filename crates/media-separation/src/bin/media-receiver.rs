@@ -150,8 +150,11 @@ async fn run(
         ));
     }
 
+    // One-shot session token: only whoever completes this control handshake
+    // can pass the media handshake (plan section 19 capability).
+    let token = media_separation::session_token();
     let (mut ctl_send, mut ctl_recv) = control_conn.accept_bi().await?;
-    media_separation::serve_candidates(&mut ctl_recv, &mut ctl_send, &cands)
+    media_separation::serve_candidates(&mut ctl_recv, &mut ctl_send, &cands, &token)
         .await
         .context("serve candidates")?;
 
@@ -173,7 +176,8 @@ async fn run(
     .await
     .context("timed out waiting for media connection")??;
 
-    let (outcome, gate) = media_separation::run_receiver_session(conn, started_unix_ms).await?;
+    let (outcome, gate) =
+        media_separation::run_receiver_session(conn, started_unix_ms, &token).await?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }

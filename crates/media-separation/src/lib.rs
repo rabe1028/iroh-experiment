@@ -115,9 +115,9 @@ impl DirectCandidate {
         // expires_at against the sender's clock rejects every fresh
         // candidate whenever the sender runs behind by more than the
         // transfer delay of the candidate exchange. The elapsed time is
-        // still measured on the sender's clock, so a small skew slack is
-        // subtracted; host clocks must be within TTL - EXPIRY_SKEW_SLACK
-        // of each other (NTP-normal hosts are off by well under a second).
+        // still measured on the sender's clock, so a skew slack is added to
+        // the threshold; host clocks must be within EXPIRY_SKEW_SLACK_MS of
+        // each other (NTP-normal hosts are off by well under a second).
         const EXPIRY_SKEW_SLACK_MS: u64 = 10_000;
         let ttl = self
             .expires_at_unix_ms
@@ -147,6 +147,17 @@ pub fn validate_candidate(
         cand.network_epoch
     );
     Ok(())
+}
+
+/// Random one-shot session token handed out with the candidates. The media
+/// handshake must present it, so a third party that reaches the media
+/// endpoint cannot hijack the accept slot of whoever completed the
+/// candidate exchange (plan section 19 capability).
+pub fn session_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Current unix time in ms (public so bins and tests share one clock for
@@ -247,47 +258,54 @@ where
     Ok(buf)
 }
 
-/// Receiver side of the control handshake: send our media candidates.
-pub async fn send_candidates<S>(stream: &mut S, cands: &[DirectCandidate]) -> Result<()>
+/// Receiver side of the control handshake: send our media candidates plus
+/// the one-shot session token the media handshake must present.
+pub async fn send_candidates<S>(stream: &mut S, cands: &[DirectCandidate], token: &str) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin + Send,
 {
-    write_frame(stream, &serde_json::to_vec(cands)?).await
+    let reply = serde_json::json!({ "token": token, "candidates": cands });
+    write_frame(stream, &serde_json::to_vec(&reply)?).await
 }
 
 /// Sender side of the control handshake: request the peer's media
-/// candidates on an opened bidirectional stream.
+/// candidates and session token on an opened bidirectional stream.
 ///
-/// Protocol: empty request frame -> candidates JSON frame.
-pub async fn request_candidates<W, R>(w: &mut W, r: &mut R) -> Result<Vec<DirectCandidate>>
+/// Protocol: empty request frame -> {token, candidates} JSON frame.
+pub async fn request_candidates<W, R>(
+    w: &mut W,
+    r: &mut R,
+) -> Result<(Vec<DirectCandidate>, String)>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
     R: tokio::io::AsyncRead + Unpin + Send,
 {
     write_frame(w, b"").await.context("send request")?;
     let json = read_frame(r).await?;
-    serde_json::from_slice(&json).context("decode candidates")
+    #[derive(Deserialize)]
+    struct Reply {
+        token: String,
+        candidates: Vec<DirectCandidate>,
+    }
+    let reply: Reply = serde_json::from_slice(&json).context("decode candidates reply")?;
+    Ok((reply.candidates, reply.token))
 }
 
-/// Receiver side of the control handshake: answer a candidate request.
-pub async fn serve_candidates<R, W>(r: &mut R, w: &mut W, cands: &[DirectCandidate]) -> Result<()>
+/// Receiver side of the control handshake: answer a candidate request with
+/// the candidates and the given session token.
+pub async fn serve_candidates<R, W>(
+    r: &mut R,
+    w: &mut W,
+    cands: &[DirectCandidate],
+    token: &str,
+) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send,
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
     let req = read_frame(r).await.context("read request")?;
     anyhow::ensure!(req.is_empty(), "unexpected request payload");
-    send_candidates(w, cands).await
-}
-
-/// Sender side of the control handshake (standalone): receive the peer's
-/// media candidates from a stream already carrying the reply.
-pub async fn recv_candidates<S>(stream: &mut S) -> Result<Vec<DirectCandidate>>
-where
-    S: tokio::io::AsyncRead + Unpin + Send,
-{
-    let json = read_frame(stream).await?;
-    serde_json::from_slice(&json).context("decode candidates")
+    send_candidates(w, cands, token).await
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +425,14 @@ impl MediaGate {
                     if self.direct_ready_at_unix_ms.is_none() {
                         self.direct_ready_at_unix_ms = Some(unix_millis());
                     }
-                    self.tx.send_replace(GateState::DirectReady);
+                    // Only notify on an actual transition: the monitor
+                    // reconciles every 50 ms, and re-sending an unchanged
+                    // DirectReady would wake the streaming loop's
+                    // state_rx.changed() select arm up to 20x/s, injecting
+                    // unpaced frames on top of the configured ticker.
+                    if !matches!(self.state(), GateState::DirectReady) {
+                        self.tx.send_replace(GateState::DirectReady);
+                    }
                 } else if self.state() == GateState::DirectReady {
                     // Selection left the direct path without a close event
                     // (e.g. migration window): treat as loss of usable path.
@@ -649,7 +674,6 @@ impl StreamStats {
 /// One parsed inbound frame.
 struct Frame {
     seq: u32,
-    sent_ms: u64,
     wire_bytes: u64,
     payload_bytes: u64,
 }
@@ -666,13 +690,11 @@ where
         Err(e) => return Err(e),
     }
     let seq = u32::from_be_bytes(header[0..4].try_into().unwrap());
-    let sent_ms = u64::from_be_bytes(header[4..12].try_into().unwrap());
     let plen = u16::from_be_bytes(header[12..14].try_into().unwrap()) as usize;
     let mut payload = vec![0u8; plen];
     stream.read_exact(&mut payload).await?;
     Ok(Some(Frame {
         seq,
-        sent_ms,
         wire_bytes: (SyntheticConfig::HEADER_BYTES + plen) as u64,
         payload_bytes: plen as u64,
     }))
@@ -747,8 +769,7 @@ where
                         stats.payload_bytes += frame.payload_bytes;
                         // Throughput must reflect what the network actually
                         // delivered, not the sender's pacing: use local
-                        // arrival times. sent_ms stays in the frame for
-                        // cross-clock diagnostics if ever needed.
+                        // arrival times.
                         let recv_ms = unix_millis();
                         if stats.first_frame_unix_ms.is_none() {
                             stats.first_frame_unix_ms = Some(recv_ms);
@@ -983,11 +1004,14 @@ const MEDIA_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// so `time_to_direct_ms` covers accept start to direct-ready instead of the
 /// stream duration.
 ///
-/// Handshake: sender sends an empty request frame, receiver answers `ready`,
-/// then the synthetic stream flows receiver-ward until done or stopped.
+/// Handshake: sender presents the session token received with the
+/// candidates, receiver answers `ready`, then the synthetic stream flows
+/// receiver-ward until done or stopped. The token binds the media accept
+/// slot to whoever completed the candidate exchange (plan section 19).
 pub async fn run_receiver_session(
     conn: Connection,
     started_unix_ms: u64,
+    expected_token: &str,
 ) -> Result<(SessionOutcome, Arc<Mutex<MediaGate>>)> {
     let gate = Arc::new(Mutex::new(MediaGate::new()));
     let state_rx = lock_gate(&gate).subscribe();
@@ -996,7 +1020,10 @@ pub async fn run_receiver_session(
     let handshake = async {
         let (mut send, mut recv) = conn.accept_bi().await.context("accept bi")?;
         let req = read_frame(&mut recv).await.context("read media request")?;
-        anyhow::ensure!(req.is_empty(), "unexpected request payload");
+        anyhow::ensure!(
+            req == expected_token.as_bytes(),
+            "media handshake token mismatch"
+        );
         write_frame(&mut send, b"ready").await?;
         Ok::<_, anyhow::Error>((send, recv))
     };
@@ -1043,6 +1070,7 @@ pub async fn run_sender_session(
     candidate: DirectCandidate,
     known_epoch: u64,
     started_unix_ms: u64,
+    token: &str,
 ) -> Result<(SessionOutcome, Arc<Mutex<MediaGate>>)> {
     validate_candidate(&candidate, [known_epoch])?;
 
@@ -1052,7 +1080,9 @@ pub async fn run_sender_session(
 
     let handshake = async {
         let (mut send, recv) = conn.open_bi().await.context("open bi")?;
-        write_frame(&mut send, b"").await.context("send request")?;
+        write_frame(&mut send, token.as_bytes())
+            .await
+            .context("send media handshake token")?;
         let mut recv = recv;
         let ready = read_frame(&mut recv).await.context("read ready")?;
         anyhow::ensure!(ready == b"ready", "receiver not ready");

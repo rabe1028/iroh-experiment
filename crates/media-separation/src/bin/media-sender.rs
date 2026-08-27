@@ -104,7 +104,7 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
     .context("control connect failed")?;
 
     let (mut ctl_send, mut ctl_recv) = control_conn.open_bi().await?;
-    let cands = request_candidates(&mut ctl_send, &mut ctl_recv)
+    let (cands, token) = request_candidates(&mut ctl_send, &mut ctl_recv)
         .await
         .context("request candidates")?;
     anyhow::ensure!(!cands.is_empty(), "receiver published no candidates");
@@ -153,7 +153,8 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
         duration: Duration::from_secs(args.duration_secs),
     };
     let (outcome, gate): (_, Arc<Mutex<MediaGate>>) =
-        run_sender_session(conn, cfg, usable[0].clone(), KNOWN_EPOCH, started_unix_ms).await?;
+        run_sender_session(conn, cfg, usable[0].clone(), KNOWN_EPOCH, started_unix_ms, &token)
+        .await?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }
