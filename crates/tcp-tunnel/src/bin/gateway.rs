@@ -18,6 +18,12 @@ struct Args {
     /// Omit to allow any endpoint (fine for local experiments only).
     #[arg(long = "allow-endpoint")]
     allow_endpoints: Vec<String>,
+    /// File holding the gateway's 32-byte secret key, created with a fresh
+    /// key on first use (0600). Without it every restart mints a new
+    /// EndpointId while clients keep dialing the old one, so the advertised
+    /// automatic redial can never recover from a gateway restart.
+    #[arg(long)]
+    key_file: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -44,11 +50,48 @@ fn main() -> Result<()> {
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(run(&services, &allow))
+    runtime.block_on(run(&services, &allow, args.key_file.as_deref()))
 }
 
-async fn run(services: &ServiceMap, allow: &[iroh::EndpointId]) -> Result<()> {
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+/// Load the gateway's secret key from `path`, creating it (with parent
+/// directories, mode 0600) with a fresh key on first use. A persistent key
+/// keeps the EndpointId stable across gateway restarts so the clients'
+/// configured target stays valid.
+fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            iroh::SecretKey::try_from(bytes.as_slice()).context("parse gateway key file")
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let key = iroh::SecretKey::generate();
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent).context("create key file parent")?;
+                }
+            }
+            std::fs::write(path, key.to_bytes()).context("write gateway key file")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .context("restrict gateway key file permissions")?;
+            }
+            Ok(key)
+        }
+        Err(e) => Err(e).context("read gateway key file"),
+    }
+}
+
+async fn run(
+    services: &ServiceMap,
+    allow: &[iroh::EndpointId],
+    key_file: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0);
+    if let Some(path) = key_file {
+        builder = builder.secret_key(load_or_create_key(path)?);
+    }
+    let endpoint = builder
         .bind()
         .await
         .context("failed to bind iroh endpoint")?;
@@ -116,5 +159,31 @@ async fn serve_connection(conn: iroh::endpoint::Connection, services: ServiceMap
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_file_reuse_keeps_the_same_key() {
+        let dir = std::env::temp_dir().join(format!("gwkey-test-{}", std::process::id()));
+        let path = dir.join("key");
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = load_or_create_key(&path).expect("create key");
+        let second = load_or_create_key(&path).expect("reload key");
+        assert_eq!(
+            first.to_bytes(),
+            second.to_bytes(),
+            "restart must reuse the persisted key so the EndpointId stays stable"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "key file must be owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
