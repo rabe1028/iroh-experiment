@@ -110,7 +110,15 @@ impl DirectCandidate {
     }
 
     pub fn is_expired(&self, now_unix_ms: u64) -> bool {
-        now_unix_ms >= self.expires_at_unix_ms
+        // Expiry relative to the candidate's own observation timestamp, not
+        // to the receiver's wall clock: comparing a receiver-built
+        // expires_at against the sender's clock rejects every fresh
+        // candidate whenever the sender runs behind by more than the
+        // transfer delay of the candidate exchange.
+        let ttl = self
+            .expires_at_unix_ms
+            .saturating_sub(self.observed_at_unix_ms);
+        now_unix_ms.saturating_sub(self.observed_at_unix_ms) >= ttl
     }
 }
 
@@ -1053,7 +1061,14 @@ pub async fn run_sender_session(
             })??;
 
     let stats = send_synthetic(send, cfg, gate.clone(), state_rx).await?;
-    let _ = recv.read_to_end(64 * 1024).await;
+    // Bounded: a receiver that finishes its stream but never closes its send
+    // half must not hold the one-shot sender past its duration without a
+    // result row.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        recv.read_to_end(64 * 1024),
+    )
+    .await;
 
     // End monitoring and take the final counters.
     monitor.stop();
