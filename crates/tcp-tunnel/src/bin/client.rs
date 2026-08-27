@@ -92,8 +92,11 @@ async fn tunnel_one(
     let mut pair = StreamPair::new(send, recv);
 
     match drive_client(&mut pair, &mut local, service_id).await {
-        Ok((up, down)) => {
-            println!("TUNNEL_CLOSED service={service_id} UP_BYTES={up} DOWN_BYTES={down}")
+        Ok(counts) => {
+            println!(
+                "TUNNEL_CLOSED service={service_id} UP_BYTES={} DOWN_BYTES={}",
+                counts.to_gateway, counts.from_gateway
+            )
         }
         Err(e) => {
             // A dead cached connection is recycled by the next caller.

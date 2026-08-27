@@ -11,27 +11,16 @@
 //! are covered structurally by the echo, interleaving, SSE and half-close
 //! tests here.
 
+mod common;
+
 use anyhow::Result;
+use common::connect_tunnel;
 use rand::RngCore;
-use tcp_tunnel::{
-    drive_client, read_status, serve_stream, write_request, ServiceMap, TunnelStatus,
-};
+use tcp_tunnel::{drive_client, read_status, serve_stream, write_request, ServiceMap, TunnelStatus};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpListener;
 
-/// One in-memory "iroh connection": runs the gateway-side handler on a
-/// spawned task and hands back the client end after completing the handshake.
-async fn connect_tunnel(services: &ServiceMap, service_id: &str) -> Result<DuplexStream> {
-    let (mut client_end, mut gateway_end) = tokio::io::duplex(64 * 1024);
-    let services = services.clone();
-    tokio::spawn(async move {
-        serve_stream(&mut gateway_end, &services).await.ok();
-    });
-    write_request(&mut client_end, service_id).await?;
-    let status = read_status(&mut client_end).await?;
-    assert_eq!(status, TunnelStatus::Ok, "handshake failed");
-    Ok(client_end)
-}
+use common::service_map;
 
 /// Raw duplex pair wired through [`tcp_tunnel::serve_stream`], without
 /// asserting handshake success; for rejection tests.
@@ -42,10 +31,6 @@ fn raw_tunnel(services: &ServiceMap) -> DuplexStream {
         serve_stream(&mut gateway_end, &services).await.ok();
     });
     client_end
-}
-
-fn service_map(specs: &[&str]) -> ServiceMap {
-    ServiceMap::from_specs(specs).expect("valid specs")
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +119,7 @@ fn parse_content_length(head: &[u8]) -> usize {
 
 #[tokio::test]
 async fn raw_echo_round_trip() -> Result<()> {
-    let services = service_map(&[&format!("echo={}", spawn_echo().await)]);
+    let services = service_map(&[format!("echo={}", spawn_echo().await)])?;
     let mut tunnel = connect_tunnel(&services, "echo").await?;
 
     let payload = b"hello over iroh";
@@ -149,7 +134,7 @@ async fn raw_echo_round_trip() -> Result<()> {
 #[tokio::test]
 async fn large_bidirectional_transfer_is_byte_exact() -> Result<()> {
     const SIZE: usize = 8 * 1024 * 1024;
-    let services = service_map(&[&format!("echo={}", spawn_echo().await)]);
+    let services = service_map(&[format!("echo={}", spawn_echo().await)])?;
     let tunnel = connect_tunnel(&services, "echo").await?;
 
     let mut tx = vec![0u8; SIZE];
@@ -186,7 +171,7 @@ async fn half_close_semantics() -> Result<()> {
         let _ = sock.write_all(b"after-your-eof").await;
     });
 
-    let services = service_map(&[&format!("halfclose={addr}")]);
+    let services = service_map(&[format!("halfclose={addr}")])?;
     let mut tunnel = connect_tunnel(&services, "halfclose").await?;
     tunnel.write_all(b"request").await?;
     tunnel.flush().await?;
@@ -223,7 +208,7 @@ async fn http11_get_and_post_keep_alive() -> Result<()> {
     })
     .await;
 
-    let services = service_map(&[&format!("web={http}")]);
+    let services = service_map(&[format!("web={http}")])?;
     let mut tunnel = connect_tunnel(&services, "web").await?;
 
     // GET with Host header like curl would send.
@@ -284,7 +269,7 @@ async fn http_chunked_response() -> Result<()> {
             .to_vec()
     })
     .await;
-    let services = service_map(&[&format!("web={http}")]);
+    let services = service_map(&[format!("web={http}")])?;
     let mut tunnel = connect_tunnel(&services, "web").await?;
 
     tunnel
@@ -306,7 +291,7 @@ async fn sse_streams_incrementally() -> Result<()> {
     const FIRST_EVENT: &[u8] =
         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nevent: a\ndata: 1\n\n";
     let http = spawn_http(|_| async move { FIRST_EVENT.to_vec() }).await;
-    let services = service_map(&[&format!("sse={http}")]);
+    let services = service_map(&[format!("sse={http}")])?;
     let mut tunnel = connect_tunnel(&services, "sse").await?;
 
     tunnel
@@ -343,7 +328,7 @@ async fn websocket_upgrade_and_frames() -> Result<()> {
         let _ = tokio::io::copy(&mut rd, &mut wr).await;
     });
 
-    let services = service_map(&[&format!("ws={addr}")]);
+    let services = service_map(&[format!("ws={addr}")])?;
     let mut tunnel = connect_tunnel(&services, "ws").await?;
 
     tunnel
@@ -373,7 +358,7 @@ async fn websocket_upgrade_and_frames() -> Result<()> {
 
 #[tokio::test]
 async fn unknown_service_is_rejected() -> Result<()> {
-    let services = service_map(&[&format!("echo={}", spawn_echo().await)]);
+    let services = service_map(&[format!("echo={}", spawn_echo().await)])?;
     let mut client_end = raw_tunnel(&services);
     write_request(&mut client_end, "nope").await?;
     let status = read_status(&mut client_end).await?;
@@ -390,7 +375,7 @@ async fn unreachable_upstream_reports_status() -> Result<()> {
         drop(l); // port now likely closed
         addr.to_string()
     };
-    let services = service_map(&[&format!("dead={dead}")]);
+    let services = service_map(&[format!("dead={dead}")])?;
     let mut client_end = raw_tunnel(&services);
     write_request(&mut client_end, "dead").await?;
     let status = read_status(&mut client_end).await?;
@@ -398,10 +383,47 @@ async fn unreachable_upstream_reports_status() -> Result<()> {
     Ok(())
 }
 
+/// The client byte counters must follow the advertised direction: N bytes
+/// upstream and a different M bytes downstream must be labeled correctly
+/// (regression for the swapped-tuple bug).
+#[tokio::test]
+async fn drive_client_byte_counters_follow_direction() -> Result<()> {
+    // Service that reads exactly 100 bytes, then writes exactly 7000 bytes.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?.to_string();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut sink = [0u8; 100];
+        sock.read_exact(&mut sink).await.unwrap();
+        let payload = vec![0x5a; 7000];
+        sock.write_all(&payload).await.unwrap();
+    });
+    let services = service_map(&[format!("asym={addr}")])?;
+    // raw end: drive_client performs the tunnel handshake itself, so the
+    // stream must not be pre-connected (a double handshake would corrupt
+    // the byte stream).
+    let mut tunnel = raw_tunnel(&services);
+    let (mut app, mut local) = tokio::io::duplex(64 * 1024);
+    let driver = tokio::spawn(async move {
+        drive_client(&mut tunnel, &mut local, "asym").await
+    });
+    app.write_all(&[0u8; 100]).await?;
+    let mut got = vec![0u8; 7000];
+    app.read_exact(&mut got).await?;
+    app.shutdown().await?;
+    let counts = tokio::time::timeout(std::time::Duration::from_secs(10), driver)
+        .await
+        .expect("drive_client must return after both sides close")
+        .unwrap()?;
+    assert_eq!(counts.to_gateway, 100, "UP must be client->gateway");
+    assert_eq!(counts.from_gateway, 7000, "DOWN must be gateway->client");
+    Ok(())
+}
+
 /// Client-side rejection path: `drive_client` errors on non-OK status.
 #[tokio::test]
 async fn drive_client_surfaces_rejection() {
-    let services = service_map(&[]);
+    let services = service_map(&[]).expect("valid specs");
     let mut client_end = raw_tunnel(&services);
 
     let (mut local_a, _local_b) = tokio::io::duplex(4096);

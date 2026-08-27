@@ -15,3 +15,12 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# ring provider: matches iroh's rustls config; without it rustls cannot pick
+# a process-level CryptoProvider in this test binary and panics.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rcgen = "0.13"
+h2 = "0.4"
+http = "1"
+bytes = "1"
+tokio-stream = "0.1"

@@ -286,16 +286,28 @@ where
     }
 }
 
+/// Bytes moved through one tunnelled stream, by direction.
+///
+/// Named fields (not a bare tuple) so an upload/download swap is a type
+/// error rather than a silent mislabel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteCounts {
+    /// Bytes sent from the client towards the gateway (upload).
+    pub to_gateway: u64,
+    /// Bytes received from the gateway by the client (download).
+    pub from_gateway: u64,
+}
+
 /// Client-side handler for one tunnelled stream.
 ///
 /// Runs the handshake for `service_id` on an already-open stream and, on
 /// success, pipes raw bytes between `stream` and `local` until both sides
-/// close. Returns `(bytes_to_gateway, bytes_from_gateway)`.
+/// close.
 pub async fn drive_client<S, L>(
     stream: &mut S,
     local: &mut L,
     service_id: &str,
-) -> Result<(u64, u64)>
+) -> Result<ByteCounts>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     L: AsyncRead + AsyncWrite + Unpin,
@@ -308,7 +320,11 @@ where
             status.message()
         );
     }
-    tokio::io::copy_bidirectional(stream, local)
+    let (from_gateway, to_gateway) = tokio::io::copy_bidirectional(stream, local)
         .await
-        .context("tunnel pipe failed")
+        .context("tunnel pipe failed")?;
+    Ok(ByteCounts {
+        to_gateway,
+        from_gateway,
+    })
 }
