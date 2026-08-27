@@ -136,13 +136,16 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
     });
 
     // The direct path can already be selected when accept completes, before
-    // the event stream is subscribed. Seed the first observation from the
-    // live snapshot so time_to_direct_ms is never lost.
+    // the event stream is subscribed. Seed both the first observation and
+    // the last-selected kind from the live snapshot, so a later close with
+    // no selected path does not fall back to the initial "relay" guess.
     {
         let paths = conn.paths();
         if let Some(p) = paths.iter().find(|p| p.is_selected()) {
-            if !p.is_relay() {
-                telemetry.lock().unwrap().first_direct = Some(t_start.elapsed());
+            let mut t = telemetry.lock().unwrap();
+            t.last_selected_is_relay = p.is_relay();
+            if !p.is_relay() && t.first_direct.is_none() {
+                t.first_direct = Some(t_start.elapsed());
             }
         }
     }
