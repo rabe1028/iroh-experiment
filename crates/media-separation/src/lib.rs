@@ -607,21 +607,28 @@ impl SyntheticConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreamStats {
     pub frames: u64,
+    /// Total bytes read/written on the wire, frame headers included.
     pub bytes_on_wire: u64,
+    /// Media payload bytes only (frame headers excluded); this is what the
+    /// result schema's payload_bytes reports.
+    pub payload_bytes: u64,
+    /// Unix ms of the first and last observed frame. On the receiver these
+    /// are local arrival times (measuring what the network actually
+    /// delivered); on the sender they are local send times.
     pub first_frame_unix_ms: Option<u64>,
     pub last_frame_unix_ms: Option<u64>,
     pub stop_reason: Option<StopReason>,
 }
 
 impl StreamStats {
-    /// Average throughput in Mbit/s across the observed frame span.
+    /// Average payload throughput in Mbit/s across the observed frame span.
     pub fn throughput_mbps(&self) -> Option<f64> {
         let first = self.first_frame_unix_ms?;
         let last = self.last_frame_unix_ms?;
         if last <= first || self.frames < 2 {
             return None;
         }
-        let bits = self.bytes_on_wire as f64 * 8.0;
+        let bits = self.payload_bytes as f64 * 8.0;
         Some(bits / ((last - first) as f64 / 1000.0) / 1_000_000.0)
     }
 }
@@ -631,6 +638,7 @@ struct Frame {
     seq: u32,
     sent_ms: u64,
     wire_bytes: u64,
+    payload_bytes: u64,
 }
 
 /// Read exactly one framed frame; `Ok(None)` on a clean FIN boundary.
@@ -653,6 +661,7 @@ where
         seq,
         sent_ms,
         wire_bytes: (SyntheticConfig::HEADER_BYTES + plen) as u64,
+        payload_bytes: plen as u64,
     }))
 }
 
@@ -722,11 +731,16 @@ where
                         expected_seq = expected_seq.wrapping_add(1);
                         stats.frames += 1;
                         stats.bytes_on_wire += frame.wire_bytes;
+                        stats.payload_bytes += frame.payload_bytes;
+                        // Throughput must reflect what the network actually
+                        // delivered, not the sender's pacing: use local
+                        // arrival times. sent_ms stays in the frame for
+                        // cross-clock diagnostics if ever needed.
+                        let recv_ms = unix_millis();
                         if stats.first_frame_unix_ms.is_none() {
-                            stats.first_frame_unix_ms =
-                                Some(frame.sent_ms.min(unix_millis()));
+                            stats.first_frame_unix_ms = Some(recv_ms);
                         }
-                        stats.last_frame_unix_ms = Some(frame.sent_ms.min(unix_millis()));
+                        stats.last_frame_unix_ms = Some(recv_ms);
                     }
                     Some(Err(_)) => {
                         // Abrupt cut: the monitor needs a moment to observe
@@ -893,6 +907,7 @@ where
 
         stats.frames += 1;
         stats.bytes_on_wire += frame.len() as u64;
+        stats.payload_bytes += cfg.frame_payload_bytes as u64;
         if stats.first_frame_unix_ms.is_none() {
             stats.first_frame_unix_ms = Some(now_ms);
         }
@@ -935,8 +950,10 @@ pub struct SessionOutcome {
     pub direct_connection_success: bool,
     pub time_to_direct_ms: Option<u64>,
     pub stream: StreamStats,
-    /// Always 0 in a compliant run; nonzero proves a relay path existed.
-    pub relay_media_bytes: u64,
+    /// Relay-side media bytes. Null: iroh 1.0.3 exposes no relay transport
+    /// byte counter, so this is unmeasured rather than zero;
+    /// `ever_relay_paths == 0` is the no-relay proof for a compliant run.
+    pub relay_media_bytes: Option<u64>,
     /// Count of relay paths ever observed by the monitor.
     pub ever_relay_paths: u64,
 }
@@ -995,7 +1012,7 @@ pub async fn run_receiver_session(
         role: MediaRole::Receiver,
         direct_connection_success: stats.frames > 0,
         time_to_direct_ms,
-        relay_media_bytes: 0,
+        relay_media_bytes: None,
         ever_relay_paths: ever_relay,
         stream: stats,
     };
@@ -1053,7 +1070,7 @@ pub async fn run_sender_session(
         role: MediaRole::Sender,
         direct_connection_success: stats.frames > 0,
         time_to_direct_ms,
-        relay_media_bytes: 0,
+        relay_media_bytes: None,
         ever_relay_paths: ever_relay,
         stream: stats,
     };

@@ -60,9 +60,9 @@ fn main() -> Result<()> {
         Ok((outcome, gate_state)) => {
             result.direct_connection_success = outcome.direct_connection_success;
             result.time_to_direct_ms = outcome.time_to_direct_ms;
-            result.payload_bytes = outcome.stream.bytes_on_wire;
+            result.payload_bytes = outcome.stream.payload_bytes;
             result.media_throughput_mbps = outcome.stream.throughput_mbps();
-            result.relay_media_rx_bytes = Some(outcome.relay_media_bytes);
+            result.relay_media_rx_bytes = outcome.relay_media_bytes;
             if outcome.ever_relay_paths > 0
                 || matches!(gate_state, media_separation::GateState::Stopped(_))
             {
