@@ -221,7 +221,14 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     } else {
         SelectedPath::DirectIp
     });
-    result.direct_path_rtt_ms = selected_rtt.map(|d| d.as_millis() as u64);
+    // The plan's direct_path_rtt_ms is the RTT of an observed direct path;
+    // a relay path's RTT (including a direct -> relay fallback) must not be
+    // recorded under it.
+    result.direct_path_rtt_ms = if selected_is_relay == Some(false) {
+        selected_rtt.map(|d| d.as_millis() as u64)
+    } else {
+        None
+    };
     result.payload_bytes = payload_bytes;
     // A failed transfer reports partial payload_bytes (how far it got) but no
     // throughput: the elapsed time of an aborted run does not measure the
