@@ -82,6 +82,9 @@ async fn run(args: &Args) -> Result<()> {
     println!("LISTENING={}", args.listen);
     println!("GATEWAY={target}");
     println!("SERVICE={}", args.service);
+    // Print the client's own ID: with a fresh --key-file the operator needs
+    // it to add this client to the gateway's --allow-endpoint list.
+    println!("ENDPOINT_ID={}", endpoint.id());
 
     loop {
         let (local, peer) = listener.accept().await?;

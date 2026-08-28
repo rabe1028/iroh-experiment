@@ -193,8 +193,13 @@ impl ServiceMap {
             host
         };
         anyhow::ensure!(!host.is_empty(), "upstream host is empty in {addr:?}");
-        port.parse::<u16>()
+        let port: u16 = port
+            .parse()
             .context(format!("port {port:?} is not a valid u16"))?;
+        // Destination port 0 is not dialable: a listener there would have
+        // bound an ephemeral port, so a route like host:0 can only ever
+        // answer UpstreamUnreachable.
+        anyhow::ensure!(port != 0, "upstream port 0 is not usable in {addr:?}");
         Ok(())
     }
 
@@ -422,6 +427,7 @@ mod tests {
             "web:port",   // non-numeric port
             "host:",      // empty port
             "host",       // missing :port entirely
+            "host:0",     // port 0 is not dialable
             "[::1:8080",  // unterminated IPv6 literal
             "[::1]x:80",  // junk after the literal
             "::1:8080",   // unbracketed IPv6 literal
