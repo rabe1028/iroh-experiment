@@ -216,7 +216,17 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
         Some(v) => Some(v.parse().context("x-observed-port is not a valid u16 port")?),
         None => None,
     };
-    let rtt_ms = header(HDR_OBSERVED_RTT_MS).and_then(|v| v.parse().ok());
+    // Same contract as x-observed-port: empty means "not reported"; a
+    // non-empty value that does not parse is malformed data and fails the
+    // probe instead of silently degrading to an absent measurement.
+    let rtt_ms = match header(HDR_OBSERVED_RTT_MS) {
+        Some(v) if v.is_empty() => None,
+        Some(v) => Some(
+            v.parse::<f64>()
+                .context("x-observed-rtt-ms is not a valid number")?,
+        ),
+        None => None,
+    };
     let colo = header(HDR_COLLO);
 
     // Consume the body so the connection can close cleanly.

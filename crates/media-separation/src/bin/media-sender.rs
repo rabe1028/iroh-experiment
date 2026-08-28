@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     );
     match outcome {
         Ok((outcome, gate_state)) => {
-            result.direct_connection_success = outcome.direct_connection_success;
+            result.direct_connection_success = Some(outcome.direct_connection_success);
             result.time_to_direct_ms = outcome.time_to_direct_ms;
             result.payload_bytes = outcome.stream.bytes_on_wire;
             result.media_throughput_mbps = outcome.stream.throughput_mbps();

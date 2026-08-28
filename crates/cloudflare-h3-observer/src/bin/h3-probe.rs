@@ -57,6 +57,10 @@ fn main() -> Result<()> {
             // when a comparison actually happened, so an un-referenced run
             // does not claim one (plan E3).
             result.reference_method = comparison.map(|_| "cloudflare-stun".to_string());
+            // Preserve the dedicated-socket caveat in the stored result:
+            // this probe never shares iroh's socket, so per-destination NAT
+            // mappings may differ from what a real connection would see.
+            result.same_socket_as_iroh = Some(obs.same_socket_as_iroh);
             result.observed_ip_equal = comparison.map(|c| {
                 matches!(
                     c,

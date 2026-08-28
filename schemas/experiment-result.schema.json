@@ -26,7 +26,8 @@
     "observed_ip_equal": { "type": ["boolean", "null"] },
     "observed_port_equal": { "type": ["boolean", "null"] },
     "probe_latency_ms": { "type": ["integer", "null"], "minimum": 0 },
-    "direct_connection_success": { "type": "boolean" },
+    "same_socket_as_iroh": { "type": ["boolean", "null"] },
+    "direct_connection_success": { "type": ["boolean", "null"] },
     "time_to_direct_ms": { "type": ["integer", "null"], "minimum": 0 },
     "selected_path": {
       "oneOf": [

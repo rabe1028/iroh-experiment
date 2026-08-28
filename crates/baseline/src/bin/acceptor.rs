@@ -180,7 +180,7 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
             "baseline",
             network_profile,
         );
-    result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
+    result.direct_connection_success = Some(first_direct.is_some() || !selected_is_relay);
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {
         SelectedPath::Relay
