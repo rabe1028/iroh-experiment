@@ -156,8 +156,16 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
         tracing::debug!(error = %err, "h3 driver ended");
     });
 
+    // Absolute-form authority: include the port when it is not the default,
+    // so servers that validate or route on :authority see the real origin
+    // the connection actually targets.
+    let authority = if port == 443 {
+        host.to_string()
+    } else {
+        format!("{host}:{port}")
+    };
     let req = http::Request::builder()
-        .uri(format!("https://{host}{path}"))
+        .uri(format!("https://{authority}{path}"))
         .header(
             "user-agent",
             concat!("iroh-experiment/", env!("CARGO_PKG_VERSION")),
@@ -200,7 +208,14 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
             .parse()
             .context("x-observed-ip is not a valid IP address")?,
     );
-    let observed_port = header(HDR_OBSERVED_PORT).and_then(|v| v.parse().ok());
+    // An intentionally empty header means "port not reported" (absent);
+    // a non-empty value must parse, so malformed measurement data fails the
+    // probe instead of silently degrading to SameIpPortMissing.
+    let observed_port = match header(HDR_OBSERVED_PORT) {
+        Some(v) if v.is_empty() => None,
+        Some(v) => Some(v.parse().context("x-observed-port is not a valid u16 port")?),
+        None => None,
+    };
     let rtt_ms = header(HDR_OBSERVED_RTT_MS).and_then(|v| v.parse().ok());
     let colo = header(HDR_COLLO);
 
