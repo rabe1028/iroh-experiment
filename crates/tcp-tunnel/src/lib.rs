@@ -34,7 +34,7 @@ pub const TUNNEL_ALPN: &[u8] = b"iroh-experiment/tcp-tunnel/0";
 pub const PROTOCOL_VERSION: u8 = 0;
 
 /// Maximum accepted length of a service id.
-const MAX_SERVICE_ID_LEN: u16 = 256;
+pub const MAX_SERVICE_ID_LEN: u16 = 256;
 
 /// Gateway response to a tunnel request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,9 +168,31 @@ impl ServiceMap {
         Ok(())
     }
 
-    /// Reject obviously invalid upstreams early so typos fail at startup.
+    /// Reject obviously invalid upstreams early so typos fail at startup:
+    /// the host must be nonempty and the authority must be syntactically
+    /// sound, not just the numeric suffix after the last colon.
     fn validate_upstream(&self, addr: &str) -> Result<()> {
-        let (_, port) = addr.rsplit_once(':').context("missing :port")?;
+        let (host, port) = addr.rsplit_once(':').context("missing :port")?;
+        let host = if let Some(rest) = host.strip_prefix('[') {
+            // Bracketed IPv6 literal: `[::1]:8080`.
+            let end = rest
+                .rfind(']')
+                .context("unterminated IPv6 literal in upstream address")?;
+            anyhow::ensure!(
+                end == rest.len() - 1,
+                "characters after ']' in IPv6 upstream address {addr:?}"
+            );
+            &rest[..end]
+        } else {
+            // Without brackets, a second colon means an unbracketed IPv6
+            // literal leaking into the host part.
+            anyhow::ensure!(
+                !host.contains(':'),
+                "IPv6 upstream addresses must be bracketed: {addr:?}"
+            );
+            host
+        };
+        anyhow::ensure!(!host.is_empty(), "upstream host is empty in {addr:?}");
         port.parse::<u16>()
             .context(format!("port {port:?} is not a valid u16"))?;
         Ok(())
@@ -376,4 +398,35 @@ where
         to_gateway,
         from_gateway,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(addr: &str) -> Result<ServiceMap> {
+        ServiceMap::from_specs([&format!("svc={addr}")])
+    }
+
+    #[test]
+    fn upstream_validation_accepts_usable_targets() {
+        for addr in ["127.0.0.1:8080", "camera.lan:80", "[::1]:8080"] {
+            assert!(spec(addr).is_ok(), "must accept {addr}");
+        }
+    }
+
+    #[test]
+    fn upstream_validation_rejects_unusable_targets() {
+        for addr in [
+            ":80",        // empty host (web=:80)
+            "web:port",   // non-numeric port
+            "host:",      // empty port
+            "host",       // missing :port entirely
+            "[::1:8080",  // unterminated IPv6 literal
+            "[::1]x:80",  // junk after the literal
+            "::1:8080",   // unbracketed IPv6 literal
+        ] {
+            assert!(spec(addr).is_err(), "must reject {addr}");
+        }
+    }
 }

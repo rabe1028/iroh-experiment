@@ -55,6 +55,15 @@ fn main() -> Result<()> {
 type SharedConn = Arc<Mutex<Option<iroh::endpoint::Connection>>>;
 
 async fn run(args: &Args) -> Result<()> {
+    // Fail before binding: an ID the wire protocol or the gateway's service
+    // map can never accept would otherwise advertise a listener that routes
+    // nothing.
+    anyhow::ensure!(!args.service.is_empty(), "--service must not be empty");
+    anyhow::ensure!(
+        args.service.len() <= tcp_tunnel::MAX_SERVICE_ID_LEN as usize,
+        "--service exceeds {} bytes",
+        tcp_tunnel::MAX_SERVICE_ID_LEN
+    );
     let mut builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0);
     if let Some(path) = &args.key_file {
         builder = builder.secret_key(load_or_create_key(path)?);
