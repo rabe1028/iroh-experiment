@@ -129,6 +129,16 @@ pub async fn observe(
         })
 }
 
+/// Wrapper so the spawned H3 driver task is aborted on every exit path,
+/// including `?`-propagated errors and the outer probe timeout.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observation> {
     // Resolve once; QUIC dials a concrete socket address.
     let addr = tokio::net::lookup_host((host, port))
@@ -150,11 +160,15 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
     let (mut driver, mut send_request) = h3::client::new(h3_quinn::Connection::new(conn))
         .await
         .context("h3 init failed")?;
-    let driver_task = tokio::spawn(async move {
+    // Abort-on-drop: the configured keep-alive would otherwise keep the
+    // driver (and the QUIC connection) alive after any early return, such as
+    // a probe timeout or a non-2xx response. Bound to this function's scope;
+    // dropping it (normally or via `?`) aborts the task.
+    let _driver_task = AbortOnDrop(tokio::spawn(async move {
         // wait_idle resolves with the connection error when it ends.
         let err = driver.wait_idle().await;
         tracing::debug!(error = %err, "h3 driver ended");
-    });
+    }));
 
     // Absolute-form authority: include the port when it is not the default,
     // so servers that validate or route on :authority see the real origin
@@ -246,8 +260,6 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
             Err(_) => break,
         }
     }
-
-    driver_task.abort();
 
     Ok(H3Observation {
         server_host: host.to_string(),
