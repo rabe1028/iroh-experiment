@@ -54,7 +54,15 @@ fn main() -> Result<()> {
     for server in &args.servers {
         match probe_server(&runtime, &args, server) {
             Ok(json) => {
-                println!("STUN_OK server={server} {json}");
+                // Pure-JSON line: the documented interface is one JSON
+                // observation per line, so status and the requested server
+                // live inside the object rather than a human-readable
+                // prefix that would break JSONL consumers (jq, serde_json).
+                let mut obj: serde_json::Value =
+                    serde_json::from_str(&json).context("probe output was not JSON")?;
+                obj["status"] = "ok".into();
+                obj["requested_server"] = server.clone().into();
+                println!("{obj}");
                 any_ok = true;
             }
             Err(e) => {
