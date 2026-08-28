@@ -79,7 +79,7 @@ async fn run(args: &Args) -> Result<()> {
         .context(format!("bind {}", args.listen))?;
 
     let conn: SharedConn = Arc::new(Mutex::new(None));
-    println!("LISTENING={}", args.listen);
+    println!("LISTENING={}", listener.local_addr().context("query bound listener address")?);
     println!("GATEWAY={target}");
     println!("SERVICE={}", args.service);
     // Print the client's own ID: with a fresh --key-file the operator needs

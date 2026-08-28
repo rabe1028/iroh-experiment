@@ -182,6 +182,12 @@ impl ServiceMap {
                 end == rest.len() - 1,
                 "characters after ']' in IPv6 upstream address {addr:?}"
             );
+            // Brackets are only valid around a real IPv6 literal, so
+            // `[localhost]:80`-style configs fail here instead of at dial.
+            let literal: std::net::Ipv6Addr = rest[..end].parse().with_context(|| {
+                format!("bracketed upstream host in {addr:?} is not an IPv6 literal")
+            })?;
+            let _ = literal;
             &rest[..end]
         } else {
             // Without brackets, a second colon means an unbracketed IPv6
@@ -430,6 +436,7 @@ mod tests {
             "host:0",     // port 0 is not dialable
             "[::1:8080",  // unterminated IPv6 literal
             "[::1]x:80",  // junk after the literal
+            "[localhost]:80", // brackets around a non-IPv6 host
             "::1:8080",   // unbracketed IPv6 literal
         ] {
             assert!(spec(addr).is_err(), "must reject {addr}");
