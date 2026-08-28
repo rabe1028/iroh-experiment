@@ -122,12 +122,27 @@ async fn tunnel_one(
         }
         Err(e) => {
             // A dead cached connection is recycled by the next caller —
-            // but only if the cache still holds that dead connection:
-            // another task may have already redialled and cached a
-            // healthy replacement, which must not be discarded.
-            if is_connection_lost(&e) {
+            // but only if the cache still holds a connection that is
+            // actually unusable: another task may have already redialled
+            // and cached a healthy replacement, which must not be
+            // discarded.
+            let stalled = is_connection_lost(&e)
+                // A handshake timeout poisons this connection even while the
+                // transport still reports it healthy: the gateway accepted
+                // the stream but stalled before its status, so keeping the
+                // cache entry would repeat the same stall for every later
+                // connection until the transport's much slower failure
+                // detection finally completes.
+                || e.to_string().contains("tunnel handshake timed out");
+            if stalled {
                 let mut guard = conn.lock().unwrap();
-                if guard.as_ref().is_some_and(|c| c.close_reason().is_some()) {
+                let unusable = guard.as_ref().is_some_and(|c| {
+                    // Transport-reported loss, or the exact stalled
+                    // connection this task was using (its close may not be
+                    // reported yet, so compare identities).
+                    c.close_reason().is_some() || c.stable_id() == gateway.stable_id()
+                });
+                if unusable {
                     *guard = None;
                 }
             }
