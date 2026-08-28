@@ -130,11 +130,12 @@ async fn dial_and_measure(
         }
     });
 
-    let (send, recv) = conn.open_bi().await.context("open_bi failed")?;
     // A transfer error after a direct path was established must not turn the
     // run into a direct-connection failure, so the transfer outcome carries
-    // the observed telemetry either way.
-    let result = match transfer_and_sample(&conn, &telemetry, send, recv, t_dial, args).await {
+    // the observed telemetry either way. Stream creation is inside the
+    // preserved region: the peer may select the direct path and close before
+    // open_bi completes.
+    let result = match transfer_and_sample(&conn, &telemetry, t_dial, args).await {
         Ok(result) => result,
         Err(err) => {
             let mut r = new_result(
@@ -184,11 +185,11 @@ fn snapshot_path_state(
 async fn transfer_and_sample(
     conn: &iroh::endpoint::Connection,
     telemetry: &Mutex<PathTelemetry>,
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
     t_dial: Instant,
     args: &Args,
 ) -> anyhow::Result<ExperimentResult> {
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi failed")?;
+
     // Send TEST_PAYLOAD_BYTES of random data in chunks; verify echo.
     let t_start = Instant::now();
     let mut sent: u64 = 0;

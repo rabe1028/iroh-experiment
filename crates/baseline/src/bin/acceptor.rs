@@ -139,33 +139,32 @@ async fn accept_and_measure(
         }
     });
 
-    let (send, recv) = conn.accept_bi().await.context("accept_bi failed")?;
     // A transfer error after a direct path was established must not turn the
     // run into a direct-connection failure, so the echo outcome carries the
-    // observed telemetry either way.
-    let result =
-        match echo_and_sample(&conn, &telemetry, send, recv, t_start, network_profile).await {
-            Ok(result) => result,
-            Err(err) => {
-                let mut r = common::new_result(
-                    format!("baseline-accept-{}", run_suffix()),
-                    "baseline",
-                    network_profile,
-                );
-                let fallback_relay = telemetry.lock().unwrap().last_selected_is_relay;
-                let (first_direct, _rtt, selected_is_relay) =
-                    snapshot_path_state(&conn, &telemetry, fallback_relay);
-                r.direct_connection_success = Some(first_direct.is_some() || !selected_is_relay);
-                r.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
-                r.selected_path = Some(if selected_is_relay {
-                    SelectedPath::Relay
-                } else {
-                    SelectedPath::DirectIp
-                });
-                r.failure_reason = Some(format!("{err:#}"));
-                r
-            }
-        };
+    // observed telemetry either way. Stream creation is inside the preserved
+    // region: the direct path may be selected before accept_bi completes.
+    let result = match echo_and_sample(&conn, &telemetry, t_start, network_profile).await {
+        Ok(result) => result,
+        Err(err) => {
+            let mut r = common::new_result(
+                format!("baseline-accept-{}", run_suffix()),
+                "baseline",
+                network_profile,
+            );
+            let fallback_relay = telemetry.lock().unwrap().last_selected_is_relay;
+            let (first_direct, _rtt, selected_is_relay) =
+                snapshot_path_state(&conn, &telemetry, fallback_relay);
+            r.direct_connection_success = Some(first_direct.is_some() || !selected_is_relay);
+            r.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
+            r.selected_path = Some(if selected_is_relay {
+                SelectedPath::Relay
+            } else {
+                SelectedPath::DirectIp
+            });
+            r.failure_reason = Some(format!("{err:#}"));
+            r
+        }
+    };
     watcher.abort();
 
     endpoint.close().await;
@@ -194,11 +193,11 @@ fn snapshot_path_state(
 async fn echo_and_sample(
     conn: &iroh::endpoint::Connection,
     telemetry: &Mutex<PathTelemetry>,
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
     t_start: Instant,
     network_profile: &str,
 ) -> anyhow::Result<ExperimentResult> {
+    let (mut send, mut recv) = conn.accept_bi().await.context("accept_bi failed")?;
+
     // Echo loop: read everything the dialer sends, write it back.
     let mut echoed: u64 = 0;
     let mut buf = vec![0u8; 64 * 1024];
