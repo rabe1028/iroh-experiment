@@ -41,6 +41,9 @@ struct Args {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        // stdout carries the JSONL observation stream; logs go to stderr so
+        // a failed earlier server or family cannot corrupt the JSON output.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
