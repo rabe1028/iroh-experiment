@@ -109,7 +109,15 @@ async fn tls_h2_session_with_sni(
     service_id: &str,
     sni: &str,
 ) -> Result<h2::client::SendRequest<Bytes>> {
-    let snis = vec![HOST.to_string(), sni.to_string()];
+    // A distinct origin must not ride on a certificate that also covers the
+    // tunnel-local hostname: covering both would let a server-name rewrite
+    // to HOST still complete TLS, which is exactly the regression the
+    // LAN-origin test exists to detect.
+    let snis = if sni == HOST {
+        vec![HOST.to_string()]
+    } else {
+        vec![sni.to_string()]
+    };
     let (service_addr, cert) = spawn_h2_tls_service_with_sni(handler, snis, sni).await?;
     let services = service_map(&[format!("{service_id}={service_addr}")])?;
     let app_stream = connect_tunnel(&services, service_id).await?;
@@ -127,6 +135,14 @@ async fn tls_h2_session_with_sni(
         .connect(server_name, app_stream)
         .await
         .context("TLS handshake through tunnel")?;
+    // h2 framing works even when TLS negotiated no ALPN, so a config
+    // regression that drops `alpn_protocols` would pass silently below; the
+    // E6 acceptance criterion is the real h2 negotiation.
+    assert_eq!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(b"h2".as_slice()),
+        "TLS through the tunnel must negotiate h2 via ALPN"
+    );
     let (request_sender, connection) =
         h2::client::handshake(tls).await.context("h2 client handshake")?;
     tokio::spawn(async move {
