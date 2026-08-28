@@ -704,6 +704,11 @@ struct Frame {
     seq: u32,
     wire_bytes: u64,
     payload_bytes: u64,
+    /// Local arrival time, sampled inside the stream-owning reader task the
+    /// moment the frame completed: sampling at dequeue would record queued
+    /// frames at consumer-scheduling time, so the throughput span would
+    /// reflect the channel queue rather than what the wire delivered.
+    arrived_unix_ms: u64,
 }
 
 /// Read exactly one framed frame; `Ok(None)` on a clean FIN boundary.
@@ -725,6 +730,9 @@ where
         seq,
         wire_bytes: (SyntheticConfig::HEADER_BYTES + plen) as u64,
         payload_bytes: plen as u64,
+        // Arrival time of the completed frame, taken before it can sit in
+        // the channel queue.
+        arrived_unix_ms: unix_millis(),
     }))
 }
 
@@ -796,9 +804,9 @@ where
                         stats.bytes_on_wire += frame.wire_bytes;
                         stats.payload_bytes += frame.payload_bytes;
                         // Throughput must reflect what the network actually
-                        // delivered, not the sender's pacing: use local
-                        // arrival times.
-                        let recv_ms = unix_millis();
+                        // delivered, not the sender's pacing: use the arrival
+                        // time sampled by the reader task, not dequeue time.
+                        let recv_ms = frame.arrived_unix_ms;
                         if stats.first_frame_unix_ms.is_none() {
                             stats.first_frame_unix_ms = Some(recv_ms);
                         }
