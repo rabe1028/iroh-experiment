@@ -104,25 +104,43 @@ pub fn new_result(
     }
 }
 
-/// A run failure together with whether the direct connection attempt had
-/// already begun when it happened. Direct-connect workflows must persist a
-/// measured failure as `Some(false)` — an aggregator excluding nulls would
-/// otherwise inflate direct-success rates — while a setup error before any
-/// attempt stays unattempted (`None`).
+/// A run failure together with the direct-connection outcome observed when
+/// it happened. A setup error before any attempt stays unattempted (`None`),
+/// a failed attempt is a measured failure (`Some(false)`), and an error after
+/// the connection was established (e.g. during the payload stream) must keep
+/// the measured success (`Some(true)`) instead of erasing it.
 #[derive(Debug)]
 pub struct RunFailure {
-    /// Whether the workflow had reached the direct connection attempt.
-    pub attempted_direct: bool,
+    /// Direct-connection outcome at failure time.
+    pub direct_connection_success: Option<bool>,
     /// The underlying error.
     pub err: anyhow::Error,
 }
 
+impl RunFailure {
+    /// The direct attempt was made but did not establish a connection.
+    pub fn failed_direct(err: anyhow::Error) -> Self {
+        Self {
+            direct_connection_success: Some(false),
+            err,
+        }
+    }
+
+    /// The direct connection was established; the failure came later.
+    pub fn direct_established(err: anyhow::Error) -> Self {
+        Self {
+            direct_connection_success: Some(true),
+            err,
+        }
+    }
+}
+
 impl From<anyhow::Error> for RunFailure {
     fn from(err: anyhow::Error) -> Self {
-        // Setup errors happen before any attempt; wrap attempt errors
-        // explicitly with `attempted_direct: true`.
+        // Setup errors happen before any attempt; wrap attempt-phase errors
+        // explicitly via `failed_direct` / `direct_established`.
         Self {
-            attempted_direct: false,
+            direct_connection_success: None,
             err,
         }
     }

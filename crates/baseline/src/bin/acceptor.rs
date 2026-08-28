@@ -55,13 +55,9 @@ fn main() -> Result<()> {
                 "baseline",
                 &args.network_profile,
             );
-            // Only an error past the accept wait is a measured failure; a
-            // setup error before the attempt stays unattempted (null).
-            r.direct_connection_success = if e.attempted_direct {
-                Some(false)
-            } else {
-                None
-            };
+            // Null until an attempt is made; a failed attempt stays false;
+            // echo-phase errors carry their own outcome (see below).
+            r.direct_connection_success = e.direct_connection_success;
             r.failure_reason = Some(format!("{e:#}"));
             r
         }
@@ -90,15 +86,12 @@ async fn run(network_profile: &str) -> Result<ExperimentResult, RunFailure> {
 
     accept_and_measure(&endpoint, network_profile)
         .await
-        .map_err(|err| RunFailure {
-            attempted_direct: true,
-            err,
-        })
+        .map_err(RunFailure::failed_direct)
 }
 
-/// Accept one connection and measure the echo transfer. Everything in here
-/// happens after the direct attempt began, so any error is a measured
-/// failure (direct_connection_success = Some(false)).
+/// Accept one connection and measure the echo transfer. Accept errors are
+/// measured failed attempts (`Some(false)`); echo errors after the connect
+/// keep the observed path telemetry in a partial result.
 async fn accept_and_measure(
     endpoint: &iroh::Endpoint,
     network_profile: &str,
@@ -146,8 +139,67 @@ async fn accept_and_measure(
         }
     });
 
+    let (send, recv) = conn.accept_bi().await.context("accept_bi failed")?;
+    // A transfer error after a direct path was established must not turn the
+    // run into a direct-connection failure, so the echo outcome carries the
+    // observed telemetry either way.
+    let result =
+        match echo_and_sample(&conn, &telemetry, send, recv, t_start, network_profile).await {
+            Ok(result) => result,
+            Err(err) => {
+                let mut r = common::new_result(
+                    format!("baseline-accept-{}", run_suffix()),
+                    "baseline",
+                    network_profile,
+                );
+                let fallback_relay = telemetry.lock().unwrap().last_selected_is_relay;
+                let (first_direct, _rtt, selected_is_relay) =
+                    snapshot_path_state(&conn, &telemetry, fallback_relay);
+                r.direct_connection_success = Some(first_direct.is_some() || !selected_is_relay);
+                r.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
+                r.selected_path = Some(if selected_is_relay {
+                    SelectedPath::Relay
+                } else {
+                    SelectedPath::DirectIp
+                });
+                r.failure_reason = Some(format!("{err:#}"));
+                r
+            }
+        };
+    watcher.abort();
+
+    endpoint.close().await;
+    Ok(result)
+}
+
+/// Sample the live path snapshot plus the event telemetry: first-direct
+/// timing, the selected path's RTT, and whether it is a relay.
+/// `fallback_relay` is used when no path was ever selected (dialer assumes
+/// relay, acceptor tracks its last event).
+fn snapshot_path_state(
+    conn: &iroh::endpoint::Connection,
+    telemetry: &Mutex<PathTelemetry>,
+    fallback_relay: bool,
+) -> (Option<Duration>, Option<Duration>, bool) {
+    let first_direct = telemetry.lock().unwrap().first_direct;
+    let (selected_rtt, selected_is_relay) = match conn.paths().iter().find(|p| p.is_selected()) {
+        Some(p) => (Some(p.rtt()), p.is_relay()),
+        None => (None, fallback_relay),
+    };
+    (first_direct, selected_rtt, selected_is_relay)
+}
+
+/// Echo the payload and wait out the migration window, building the
+/// success-path result.
+async fn echo_and_sample(
+    conn: &iroh::endpoint::Connection,
+    telemetry: &Mutex<PathTelemetry>,
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    t_start: Instant,
+    network_profile: &str,
+) -> anyhow::Result<ExperimentResult> {
     // Echo loop: read everything the dialer sends, write it back.
-    let (mut send, mut recv) = conn.accept_bi().await.context("accept_bi failed")?;
     let mut echoed: u64 = 0;
     let mut buf = vec![0u8; 64 * 1024];
     while echoed < TEST_PAYLOAD_BYTES as u64 {
@@ -166,33 +218,28 @@ async fn accept_and_measure(
     // would truncate observation on high-latency / lossy profiles and bias
     // direct-success rates. Stop as soon as a direct path was selected, the
     // connection closed, or the experiment-wide timeout expired.
-    let (first_direct, last_selected_is_relay) = loop {
-        {
+    loop {
+        let done = {
             let t = telemetry.lock().unwrap();
-            if !t.last_selected_is_relay
-                || first_direct_ready(&t)
+            !t.last_selected_is_relay
+                || t.first_direct.is_some()
                 || conn.close_reason().is_some()
                 || t_start.elapsed() > DIRECT_MIGRATION_TIMEOUT
-            {
-                break (t.first_direct, t.last_selected_is_relay);
-            }
+        };
+        if done {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    watcher.abort();
+    }
 
     let stats = conn.stats();
     // Final state comes from the live path snapshot; the event snapshot is
     // only used for transition timing. If the direct path was selected before
     // the watcher subscribed, or its event is still pending, the live snapshot
     // still reports it correctly.
-    let (selected_rtt, selected_is_relay) = {
-        let paths = conn.paths();
-        match paths.iter().find(|p| p.is_selected()) {
-            Some(p) => (Some(p.rtt()), p.is_relay()),
-            None => (None, last_selected_is_relay),
-        }
-    };
+    let fallback_relay = telemetry.lock().unwrap().last_selected_is_relay;
+    let (first_direct, selected_rtt, selected_is_relay) =
+        snapshot_path_state(conn, telemetry, fallback_relay);
     if let Some(ms) = first_direct {
         println!("TIME_TO_DIRECT_MS={}", ms.as_millis());
     }
@@ -223,13 +270,7 @@ async fn accept_and_measure(
         stats.udp_tx.datagrams, stats.udp_rx.datagrams
     );
 
-    endpoint.close().await;
     Ok(result)
-}
-
-/// True once a direct transition was ever observed.
-fn first_direct_ready(t: &PathTelemetry) -> bool {
-    t.first_direct.is_some()
 }
 
 fn run_suffix() -> String {

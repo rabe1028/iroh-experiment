@@ -68,14 +68,10 @@ fn main() -> Result<()> {
             println!("OUTCOME={}", serde_json::to_string(&outcome)?);
         }
         Err(e) => {
-            // Only an error past the media dial is a measured failure; a
-            // control-plane / candidate-validation error before it stays
-            // unattempted (null).
-            result.direct_connection_success = if e.attempted_direct {
-                Some(false)
-            } else {
-                None
-            };
+            // Null until the media dial is attempted; a failed dial stays
+            // false; a stream error after establishment stays true (the
+            // direct attempt itself succeeded).
+            result.direct_connection_success = e.direct_connection_success;
             result.failure_reason = Some(format!("{e:#}"));
         }
     }
@@ -100,12 +96,7 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
     // (direct_connection_success = null).
     let (pair, candidate) = setup_control_plane(args).await?;
 
-    dial_media_and_stream(&pair, candidate, args)
-        .await
-        .map_err(|err| RunFailure {
-            attempted_direct: true,
-            err,
-        })
+    dial_media_and_stream(&pair, candidate, args).await
 }
 
 /// Bind endpoints, fetch the receiver's media candidates over the control
@@ -144,14 +135,14 @@ async fn setup_control_plane(
 /// The network epoch of the candidates this experiment exchanges.
 const KNOWN_EPOCH: u64 = 0;
 
-/// Dial the media endpoint directly and stream. Everything in here happens
-/// after the direct attempt began, so any error is a measured failure
-/// (direct_connection_success = Some(false)).
+/// Dial the media endpoint directly and stream. A dial error is a measured
+/// failed attempt (`Some(false)`); a stream error after the connection was
+/// established keeps the measured success (`Some(true)`).
 async fn dial_media_and_stream(
     pair: &EndpointPair,
     candidate: media_separation::DirectCandidate,
     args: &Args,
-) -> anyhow::Result<(media_separation::SessionOutcome, GateState)> {
+) -> Result<(media_separation::SessionOutcome, GateState), RunFailure> {
     tracing::info!(addr = %candidate.addr, "dialed media candidate");
 
     // --- media plane: direct-only dial ---
@@ -161,8 +152,10 @@ async fn dial_media_and_stream(
         pair.media.connect(media_addr, MEDIA_ALPN),
     )
     .await
-    .context("media connect timed out")?
-    .context("media connect failed")?;
+    .context("media connect timed out")
+    .map_err(RunFailure::failed_direct)?
+    .context("media connect failed")
+    .map_err(RunFailure::failed_direct)?;
 
     let cfg = SyntheticConfig {
         bitrate_bps: (args.bitrate_mbps * 1_000_000.0) as u64,
@@ -170,7 +163,9 @@ async fn dial_media_and_stream(
         duration: Duration::from_secs(args.duration_secs),
     };
     let (outcome, gate): (_, Arc<Mutex<MediaGate>>) =
-        run_sender_session(conn, cfg, candidate.clone(), KNOWN_EPOCH).await?;
+        run_sender_session(conn, cfg, candidate.clone(), KNOWN_EPOCH)
+            .await
+            .map_err(RunFailure::direct_established)?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }

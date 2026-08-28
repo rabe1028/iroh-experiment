@@ -70,14 +70,10 @@ fn main() -> Result<()> {
             );
         }
         Err(e) => {
-            // Only an error once we started waiting for the direct media
-            // connection is a measured failure; a control-plane error before
-            // it stays unattempted (null).
-            result.direct_connection_success = if e.attempted_direct {
-                Some(false)
-            } else {
-                None
-            };
+            // Null until the media accept is attempted; a failed accept stays
+            // false; a stream error after establishment stays true (the
+            // direct attempt itself succeeded).
+            result.direct_connection_success = e.direct_connection_success;
             result.failure_reason = Some(format!("{e:#}"));
         }
     }
@@ -102,12 +98,7 @@ async fn run(
     // null).
     let pair = setup_control_plane(args).await?;
 
-    accept_media_and_measure(&pair, args)
-        .await
-        .map_err(|err| RunFailure {
-            attempted_direct: true,
-            err,
-        })
+    accept_media_and_measure(&pair, args).await
 }
 
 /// Bind the endpoint pair, publish media candidates over the control
@@ -156,16 +147,19 @@ async fn setup_control_plane(args: &Args) -> anyhow::Result<EndpointPair> {
     Ok(pair)
 }
 
-/// Wait for the direct media connection and receive the stream. Everything
-/// in here happens after the direct attempt began, so any error is a
-/// measured failure (direct_connection_success = Some(false)).
+/// Wait for the direct media connection and receive the stream. An accept
+/// error is a measured failed attempt (`Some(false)`); a stream error after
+/// the connection was established keeps the measured success (`Some(true)`).
 async fn accept_media_and_measure(
     pair: &EndpointPair,
     args: &Args,
-) -> anyhow::Result<(
-    media_separation::SessionOutcome,
-    media_separation::GateState,
-)> {
+) -> Result<
+    (
+        media_separation::SessionOutcome,
+        media_separation::GateState,
+    ),
+    RunFailure,
+> {
     // Wait for the media connection on the direct-only endpoint.
     tracing::info!("waiting for media connection");
     let conn = tokio::time::timeout(Duration::from_secs(60), async {
@@ -179,14 +173,18 @@ async fn accept_media_and_measure(
             .context("media connect failed")
     })
     .await
-    .context("timed out waiting for media connection")??;
+    .context("timed out waiting for media connection")
+    .map_err(RunFailure::failed_direct)?
+    .map_err(RunFailure::failed_direct)?;
 
     let cfg = SyntheticConfig {
         bitrate_bps: (args.bitrate_mbps * 1_000_000.0) as u64,
         frame_payload_bytes: 1200,
         duration: Duration::from_secs(args.duration_secs),
     };
-    let (outcome, gate) = media_separation::run_receiver_session(conn, cfg).await?;
+    let (outcome, gate) = media_separation::run_receiver_session(conn, cfg)
+        .await
+        .map_err(RunFailure::direct_established)?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }
