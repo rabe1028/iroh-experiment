@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{ExperimentResult, SelectedPath, TEST_PAYLOAD_BYTES};
+use common::{ExperimentResult, RunFailure, SelectedPath, TEST_PAYLOAD_BYTES};
 use iroh::endpoint::PathEvent;
 use tokio_stream::StreamExt;
 
@@ -38,8 +38,7 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();
@@ -56,10 +55,13 @@ fn main() -> Result<()> {
                 "baseline",
                 &args.network_profile,
             );
-            // This workflow always waits for a direct connection, so an
-            // error here is a known failed attempt, not an unattempted
-            // check.
-            r.direct_connection_success = Some(false);
+            // Only an error past the accept wait is a measured failure; a
+            // setup error before the attempt stays unattempted (null).
+            r.direct_connection_success = if e.attempted_direct {
+                Some(false)
+            } else {
+                None
+            };
             r.failure_reason = Some(format!("{e:#}"));
             r
         }
@@ -72,7 +74,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run(network_profile: &str) -> Result<ExperimentResult> {
+async fn run(network_profile: &str) -> Result<ExperimentResult, RunFailure> {
+    // Setup: failures here happen before any direct attempt, so a failure
+    // record stays unattempted (direct_connection_success = null).
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .bind()
         .await
@@ -84,6 +88,21 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
         println!("ADDR={addr}");
     }
 
+    accept_and_measure(&endpoint, network_profile)
+        .await
+        .map_err(|err| RunFailure {
+            attempted_direct: true,
+            err,
+        })
+}
+
+/// Accept one connection and measure the echo transfer. Everything in here
+/// happens after the direct attempt began, so any error is a measured
+/// failure (direct_connection_success = Some(false)).
+async fn accept_and_measure(
+    endpoint: &iroh::Endpoint,
+    network_profile: &str,
+) -> anyhow::Result<ExperimentResult> {
     // Accept exactly one connection for the baseline run.
     let conn = endpoint
         .accept()
@@ -178,12 +197,11 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
         println!("TIME_TO_DIRECT_MS={}", ms.as_millis());
     }
 
-    let mut result =
-        common::new_result(
-            format!("baseline-accept-{}", run_suffix()),
-            "baseline",
-            network_profile,
-        );
+    let mut result = common::new_result(
+        format!("baseline-accept-{}", run_suffix()),
+        "baseline",
+        network_profile,
+    );
     result.direct_connection_success = Some(first_direct.is_some() || !selected_is_relay);
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {

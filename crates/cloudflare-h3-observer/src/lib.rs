@@ -213,7 +213,10 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
     // probe instead of silently degrading to SameIpPortMissing.
     let observed_port = match header(HDR_OBSERVED_PORT) {
         Some(v) if v.is_empty() => None,
-        Some(v) => Some(v.parse().context("x-observed-port is not a valid u16 port")?),
+        Some(v) => Some(
+            v.parse()
+                .context("x-observed-port is not a valid u16 port")?,
+        ),
         None => None,
     };
     // Same contract as x-observed-port: empty means "not reported"; a
@@ -221,10 +224,16 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
     // probe instead of silently degrading to an absent measurement.
     let rtt_ms = match header(HDR_OBSERVED_RTT_MS) {
         Some(v) if v.is_empty() => None,
-        Some(v) => Some(
-            v.parse::<f64>()
-                .context("x-observed-rtt-ms is not a valid number")?,
-        ),
+        Some(v) => {
+            let parsed: f64 = v
+                .parse()
+                .context("x-observed-rtt-ms is not a valid number")?;
+            anyhow::ensure!(
+                parsed.is_finite() && parsed >= 0.0,
+                "x-observed-rtt-ms is not a physically valid RTT"
+            );
+            Some(parsed)
+        }
         None => None,
     };
     let colo = header(HDR_COLLO);

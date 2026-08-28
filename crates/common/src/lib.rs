@@ -78,7 +78,8 @@ pub fn new_result(
     network_profile: &str,
 ) -> ExperimentResult {
     ExperimentResult {
-        schema_version: 1,
+        // v2: direct_connection_success became nullable (unattempted vs failed).
+        schema_version: 2,
         run_id: run_id.into(),
         timestamp: SystemTime::now(),
         git_revision: None,
@@ -100,6 +101,42 @@ pub fn new_result(
         payload_bytes: 0,
         media_throughput_mbps: None,
         failure_reason: None,
+    }
+}
+
+/// A run failure together with whether the direct connection attempt had
+/// already begun when it happened. Direct-connect workflows must persist a
+/// measured failure as `Some(false)` — an aggregator excluding nulls would
+/// otherwise inflate direct-success rates — while a setup error before any
+/// attempt stays unattempted (`None`).
+#[derive(Debug)]
+pub struct RunFailure {
+    /// Whether the workflow had reached the direct connection attempt.
+    pub attempted_direct: bool,
+    /// The underlying error.
+    pub err: anyhow::Error,
+}
+
+impl From<anyhow::Error> for RunFailure {
+    fn from(err: anyhow::Error) -> Self {
+        // Setup errors happen before any attempt; wrap attempt errors
+        // explicitly with `attempted_direct: true`.
+        Self {
+            attempted_direct: false,
+            err,
+        }
+    }
+}
+
+impl std::fmt::Display for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.err, f)
+    }
+}
+
+impl std::error::Error for RunFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.err.as_ref())
     }
 }
 

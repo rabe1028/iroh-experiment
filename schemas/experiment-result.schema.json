@@ -15,7 +15,7 @@
     "payload_bytes"
   ],
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
+    "schema_version": { "type": "integer", "const": 2 },
     "run_id": { "type": "string" },
     "timestamp": { "type": "string", "format": "date-time" },
     "git_revision": { "type": ["string", "null"] },

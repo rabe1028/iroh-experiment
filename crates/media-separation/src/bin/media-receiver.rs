@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::new_result;
+use common::{new_result, RunFailure};
 use media_separation::{DirectCandidate, EndpointPair, SyntheticConfig, CONTROL_ALPN, MEDIA_ALPN};
 
 #[derive(Parser)]
@@ -70,10 +70,14 @@ fn main() -> Result<()> {
             );
         }
         Err(e) => {
-            // The media workflow always waits for a direct connection, so
-            // an error here is a known failed attempt, not an unattempted
-            // check.
-            result.direct_connection_success = Some(false);
+            // Only an error once we started waiting for the direct media
+            // connection is a measured failure; a control-plane error before
+            // it stays unattempted (null).
+            result.direct_connection_success = if e.attempted_direct {
+                Some(false)
+            } else {
+                None
+            };
             result.failure_reason = Some(format!("{e:#}"));
         }
     }
@@ -86,10 +90,29 @@ fn main() -> Result<()> {
 
 async fn run(
     args: &Args,
-) -> Result<(
-    media_separation::SessionOutcome,
-    media_separation::GateState,
-)> {
+) -> Result<
+    (
+        media_separation::SessionOutcome,
+        media_separation::GateState,
+    ),
+    RunFailure,
+> {
+    // Control plane: failures here happen before any direct media attempt,
+    // so a failure record stays unattempted (direct_connection_success =
+    // null).
+    let pair = setup_control_plane(args).await?;
+
+    accept_media_and_measure(&pair, args)
+        .await
+        .map_err(|err| RunFailure {
+            attempted_direct: true,
+            err,
+        })
+}
+
+/// Bind the endpoint pair, publish media candidates over the control
+/// connection, and serve them to the sender.
+async fn setup_control_plane(args: &Args) -> anyhow::Result<EndpointPair> {
     let pair = EndpointPair::bind(iroh::endpoint::presets::N0).await?;
     pair.control.set_alpns(vec![CONTROL_ALPN.to_vec()]);
     pair.media.set_alpns(vec![MEDIA_ALPN.to_vec()]);
@@ -130,7 +153,19 @@ async fn run(
     media_separation::serve_candidates(&mut ctl_recv, &mut ctl_send, &cands)
         .await
         .context("serve candidates")?;
+    Ok(pair)
+}
 
+/// Wait for the direct media connection and receive the stream. Everything
+/// in here happens after the direct attempt began, so any error is a
+/// measured failure (direct_connection_success = Some(false)).
+async fn accept_media_and_measure(
+    pair: &EndpointPair,
+    args: &Args,
+) -> anyhow::Result<(
+    media_separation::SessionOutcome,
+    media_separation::GateState,
+)> {
     // Wait for the media connection on the direct-only endpoint.
     tracing::info!("waiting for media connection");
     let conn = tokio::time::timeout(Duration::from_secs(60), async {

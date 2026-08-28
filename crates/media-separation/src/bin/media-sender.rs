@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::new_result;
+use common::{new_result, RunFailure};
 use iroh::{EndpointAddr, EndpointId};
 use media_separation::{
     request_candidates, run_sender_session, EndpointPair, GateState, MediaGate, SyntheticConfig,
@@ -68,10 +68,14 @@ fn main() -> Result<()> {
             println!("OUTCOME={}", serde_json::to_string(&outcome)?);
         }
         Err(e) => {
-            // The media workflow always attempts a direct connection, so an
-            // error here is a known failed attempt, not an unattempted
-            // check.
-            result.direct_connection_success = Some(false);
+            // Only an error past the media dial is a measured failure; a
+            // control-plane / candidate-validation error before it stays
+            // unattempted (null).
+            result.direct_connection_success = if e.attempted_direct {
+                Some(false)
+            } else {
+                None
+            };
             result.failure_reason = Some(format!("{e:#}"));
         }
     }
@@ -90,10 +94,27 @@ fn run_suffix() -> String {
         .to_string()
 }
 
-async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState)> {
+async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState), RunFailure> {
+    // Control plane + candidate validation: failures here happen before the
+    // direct media dial, so a failure record stays unattempted
+    // (direct_connection_success = null).
+    let (pair, candidate) = setup_control_plane(args).await?;
+
+    dial_media_and_stream(&pair, candidate, args)
+        .await
+        .map_err(|err| RunFailure {
+            attempted_direct: true,
+            err,
+        })
+}
+
+/// Bind endpoints, fetch the receiver's media candidates over the control
+/// connection, and validate them (fail-closed).
+async fn setup_control_plane(
+    args: &Args,
+) -> anyhow::Result<(EndpointPair, media_separation::DirectCandidate)> {
     let pair = EndpointPair::bind(iroh::endpoint::presets::N0).await?;
 
-    // --- control plane: fetch the receiver's media candidates ---
     let target: EndpointId = args.control_id.parse().context("invalid EndpointId")?;
     let control_conn = tokio::time::timeout(
         Duration::from_secs(30),
@@ -109,7 +130,6 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
         .context("request candidates")?;
     anyhow::ensure!(!cands.is_empty(), "receiver published no candidates");
 
-    const KNOWN_EPOCH: u64 = 0;
     let candidate = cands
         .iter()
         .find(|c| !c.addr.ip().is_loopback() && c.network_epoch == KNOWN_EPOCH)
@@ -118,6 +138,20 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
         .context("no candidate from a known epoch")?;
     media_separation::validate_candidate(&candidate, [KNOWN_EPOCH])
         .context("candidate rejected (fail-closed)")?;
+    Ok((pair, candidate))
+}
+
+/// The network epoch of the candidates this experiment exchanges.
+const KNOWN_EPOCH: u64 = 0;
+
+/// Dial the media endpoint directly and stream. Everything in here happens
+/// after the direct attempt began, so any error is a measured failure
+/// (direct_connection_success = Some(false)).
+async fn dial_media_and_stream(
+    pair: &EndpointPair,
+    candidate: media_separation::DirectCandidate,
+    args: &Args,
+) -> anyhow::Result<(media_separation::SessionOutcome, GateState)> {
     tracing::info!(addr = %candidate.addr, "dialed media candidate");
 
     // --- media plane: direct-only dial ---

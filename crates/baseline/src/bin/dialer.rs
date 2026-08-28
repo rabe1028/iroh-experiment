@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::Parser;
 use common::{
-    new_result, ExperimentResult, BASELINE_ALPN, SelectedPath, TEST_PAYLOAD_BYTES,
+    new_result, ExperimentResult, RunFailure, SelectedPath, BASELINE_ALPN, TEST_PAYLOAD_BYTES,
 };
 use iroh::endpoint::PathEvent;
 use iroh::EndpointId;
@@ -44,8 +44,7 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();
@@ -61,9 +60,13 @@ fn main() -> Result<()> {
                 "baseline",
                 &args.network_profile,
             );
-            // This workflow always attempts a direct connection, so an error
-            // here is a known failed attempt, not an unattempted check.
-            r.direct_connection_success = Some(false);
+            // Only an error past the dial start is a measured failure; a
+            // setup error before the attempt stays unattempted (null).
+            r.direct_connection_success = if e.attempted_direct {
+                Some(false)
+            } else {
+                None
+            };
             r.failure_reason = Some(format!("{e:#}"));
             r
         }
@@ -76,13 +79,31 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run(args: &Args) -> Result<ExperimentResult> {
+async fn run(args: &Args) -> Result<ExperimentResult, RunFailure> {
+    // Setup: failures here happen before any direct attempt, so a failure
+    // record stays unattempted (direct_connection_success = null).
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .bind()
         .await
         .context("failed to bind iroh endpoint")?;
 
     let target: EndpointId = args.id.parse().context("invalid EndpointId")?;
+    dial_and_measure(&endpoint, target, args)
+        .await
+        .map_err(|err| RunFailure {
+            attempted_direct: true,
+            err,
+        })
+}
+
+/// Dial the acceptor and measure the payload transfer. Everything in here
+/// happens after the direct attempt began, so any error is a measured
+/// failure (direct_connection_success = Some(false)).
+async fn dial_and_measure(
+    endpoint: &iroh::Endpoint,
+    target: EndpointId,
+    args: &Args,
+) -> anyhow::Result<ExperimentResult> {
     let t_dial = Instant::now();
 
     let conn = endpoint
