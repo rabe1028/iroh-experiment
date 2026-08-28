@@ -58,7 +58,7 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
         .unwrap();
     let rx_control_id = rx_pair.control.id();
 
-    tokio::spawn(async move {
+    let rx_handle = tokio::spawn(async move {
         let incoming = rx_pair.control.accept().await.unwrap().accept().unwrap();
         let conn = incoming.await.unwrap();
         let cands = rx_pair
@@ -126,6 +126,9 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
         gate.lock().unwrap().state(),
         GateState::DirectReady | GateState::Stopped(_)
     ));
+    // Propagate receiver-side panics / failed assertions: a detached task
+    // would be aborted by the runtime before its failure is observed.
+    rx_handle.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
