@@ -68,9 +68,10 @@ If a Worker route is undesirable, a Transform Rule can still expose the IP
       "action": "rewrite",
       "action_parameters": {
         "headers": {
-          "set": [
-            { "name": "x-observed-ip", "expression": "ip.src" }
-          ]
+          "x-observed-ip": {
+            "operation": "set",
+            "expression": "ip.src"
+          }
         }
       }
     }
