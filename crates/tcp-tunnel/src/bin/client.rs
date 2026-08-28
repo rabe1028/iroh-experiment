@@ -101,6 +101,13 @@ async fn run(args: &Args) -> Result<()> {
     }
 }
 
+/// Upper bound for allocating the bidirectional stream: the gateway's
+/// peer-advertised concurrent-stream limit can be exhausted (many long-lived
+/// tunnels, or a gateway that stopped accepting streams), and `open_bi()`
+/// would wait for capacity indefinitely — the request/status deadline in
+/// `drive_client` would never even start.
+const OPEN_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Forward one local TCP connection over a (possibly new) gateway stream.
 async fn tunnel_one(
     endpoint: &iroh::Endpoint,
@@ -110,7 +117,12 @@ async fn tunnel_one(
     service_id: &str,
 ) -> Result<()> {
     let gateway = get_or_dial(endpoint, target, conn).await?;
-    let (send, recv) = gateway.open_bi().await.context("open_bi failed")?;
+    let (send, recv) = tokio::time::timeout(OPEN_STREAM_TIMEOUT, gateway.open_bi())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("tunnel handshake timed out waiting for stream capacity")
+        })?
+        .context("open_bi failed")?;
     let mut pair = StreamPair::new(send, recv);
 
     match drive_client(&mut pair, &mut local, service_id).await {
