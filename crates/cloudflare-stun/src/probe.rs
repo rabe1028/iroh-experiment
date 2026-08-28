@@ -64,6 +64,12 @@ pub async fn probe(
     let request = encode_binding_request(&txn);
 
     let mut last_err = None;
+    // RTT origin is the first send, not the matching attempt's send: every
+    // attempt reuses one transaction id, so a delayed response to an earlier
+    // attempt is indistinguishable from the current one and measuring from
+    // the latest retransmission could report near-zero RTTs exactly on the
+    // lossy networks where retries happen.
+    let first_sent = Instant::now();
     for attempt in 0..config.attempts {
         if attempt > 0 {
             // Linear backoff keeps worst-case latency bounded for an
@@ -76,7 +82,6 @@ pub async fn probe(
             .await
             .context("sending binding request")?;
 
-        let started = Instant::now();
         let deadline = tokio::time::Instant::now() + config.attempt_timeout;
         // Diagnostic from non-matching datagrams, if any arrived; preferred
         // over a bare "timeout" so silent servers and wrong-traffic servers
@@ -106,7 +111,7 @@ pub async fn probe(
                                     method: "cloudflare-stun",
                                     server,
                                     observed_addr: resp.xor_mapped_address,
-                                    rtt: started.elapsed(),
+                                    rtt: first_sent.elapsed(),
                                     observed_at: SystemTime::now(),
                                 });
                             }

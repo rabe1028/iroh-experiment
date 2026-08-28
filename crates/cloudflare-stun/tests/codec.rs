@@ -67,6 +67,25 @@ fn error_response_surfaces_code_and_reason() {
 }
 
 #[test]
+fn error_response_is_padded_to_four_byte_boundaries() {
+    // 4 code bytes + 17 reason bytes = 21, padded to 24: RFC 5389 §15
+    // requires attributes to end on a four-byte boundary, and compliant
+    // peers reject a message length that is not a multiple of four.
+    let txn = TransactionId::random();
+    let buf = encode_binding_error(420, "Unknown Attribute", &txn);
+    let msg_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    assert_eq!(
+        (20 + msg_len) % 4,
+        0,
+        "STUN message length must be a multiple of four"
+    );
+    // The attribute's own length stays unpadded.
+    let attr_len = u16::from_be_bytes([buf[22], buf[23]]) as usize;
+    assert_eq!(attr_len, 4 + b"Unknown Attribute".len());
+    assert_eq!(buf.len(), 20 + 4 + 24);
+}
+
+#[test]
 fn error_from_wrong_transaction_is_rejected() {
     let real = TransactionId::random();
     let other = TransactionId::random();
