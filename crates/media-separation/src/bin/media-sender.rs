@@ -68,6 +68,10 @@ fn main() -> Result<()> {
             println!("OUTCOME={}", serde_json::to_string(&outcome)?);
         }
         Err(e) => {
+            // The media workflow always attempts a direct connection, so an
+            // error here is a known failed attempt, not an unattempted
+            // check.
+            result.direct_connection_success = Some(false);
             result.failure_reason = Some(format!("{e:#}"));
         }
     }

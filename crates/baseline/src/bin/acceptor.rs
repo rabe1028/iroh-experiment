@@ -56,6 +56,10 @@ fn main() -> Result<()> {
                 "baseline",
                 &args.network_profile,
             );
+            // This workflow always waits for a direct connection, so an
+            // error here is a known failed attempt, not an unattempted
+            // check.
+            r.direct_connection_success = Some(false);
             r.failure_reason = Some(format!("{e:#}"));
             r
         }
