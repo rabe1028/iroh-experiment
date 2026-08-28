@@ -379,7 +379,13 @@ pub struct ByteCounts {
 /// accepts the stream but stalls before its status (other streams keeping the
 /// shared QUIC connection alive) must not park the client task and its local
 /// socket forever; the tunnel copy itself stays unbounded.
-const CLIENT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// Strictly greater than the gateway's REQUEST_TIMEOUT +
+/// UPSTREAM_DIAL_TIMEOUT: the client deadline starts before the request is
+/// written while the gateway's dial deadline starts only after reading it, so
+/// an equal deadline would usually expire first and the client would never
+/// receive the gateway's UpstreamUnreachable terminal status.
+const CLIENT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
 pub async fn drive_client<S, L>(
     stream: &mut S,
