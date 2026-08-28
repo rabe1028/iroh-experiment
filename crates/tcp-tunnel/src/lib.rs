@@ -342,6 +342,12 @@ pub struct ByteCounts {
 /// Runs the handshake for `service_id` on an already-open stream and, on
 /// success, pipes raw bytes between `stream` and `local` until both sides
 /// close.
+/// Upper bound for the client-side request/status exchange. A gateway that
+/// accepts the stream but stalls before its status (other streams keeping the
+/// shared QUIC connection alive) must not park the client task and its local
+/// socket forever; the tunnel copy itself stays unbounded.
+const CLIENT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub async fn drive_client<S, L>(
     stream: &mut S,
     local: &mut L,
@@ -351,8 +357,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     L: AsyncRead + AsyncWrite + Unpin,
 {
-    write_request(stream, service_id).await?;
-    let status = read_status(stream).await?;
+    let status = tokio::time::timeout(CLIENT_HANDSHAKE_TIMEOUT, async {
+        write_request(stream, service_id).await?;
+        read_status(stream).await
+    })
+    .await
+    .context("tunnel handshake timed out")??;
     if status != TunnelStatus::Ok {
         anyhow::bail!(
             "gateway rejected service {service_id:?}: {}",
