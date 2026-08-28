@@ -46,8 +46,16 @@ pub struct ExperimentResult {
     pub observed_ip_equal: Option<bool>,
     pub observed_port_equal: Option<bool>,
     pub probe_latency_ms: Option<u64>,
+    /// Whether both ends of this observation used the same kind of socket
+    /// (false for standalone probes: NATs with per-destination mappings may
+    /// show a different mapping than an iroh connection would get). Null
+    /// when the run does not measure it.
+    pub same_socket_as_iroh: Option<bool>,
     // --- direct connection ---
-    pub direct_connection_success: bool,
+    /// Whether an iroh direct connection was established. Null for methods
+    /// that do not attempt one (e.g. external-address probes), so an
+    /// unattempted check is never mistaken for a measured failure.
+    pub direct_connection_success: Option<bool>,
     pub time_to_direct_ms: Option<u64>,
     pub selected_path: Option<SelectedPath>,
     // --- relay traffic (measured from PR 3/6 onwards) ---
@@ -81,7 +89,8 @@ pub fn new_result(
         observed_ip_equal: None,
         observed_port_equal: None,
         probe_latency_ms: None,
-        direct_connection_success: false,
+        same_socket_as_iroh: None,
+        direct_connection_success: None,
         time_to_direct_ms: None,
         selected_path: None,
         relay_control_tx_bytes: None,

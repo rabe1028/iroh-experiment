@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     );
     match outcome {
         Ok((outcome, gate_state)) => {
-            result.direct_connection_success = outcome.direct_connection_success;
+            result.direct_connection_success = Some(outcome.direct_connection_success);
             result.time_to_direct_ms = outcome.time_to_direct_ms;
             // A successful run streamed only under a direct-selected gate.
             if outcome.direct_connection_success {
@@ -75,6 +75,10 @@ fn main() -> Result<()> {
             println!("OUTCOME={}", serde_json::to_string(&outcome)?);
         }
         Err(e) => {
+            // The media workflow always attempts a direct connection, so an
+            // error here is a known failed attempt, not an unattempted
+            // check.
+            result.direct_connection_success = Some(false);
             result.failure_reason = Some(format!("{e:#}"));
         }
     }

@@ -61,6 +61,9 @@ fn main() -> Result<()> {
                 "baseline",
                 &args.network_profile,
             );
+            // This workflow always attempts a direct connection, so an error
+            // here is a known failed attempt, not an unattempted check.
+            r.direct_connection_success = Some(false);
             r.failure_reason = Some(format!("{e:#}"));
             r
         }
@@ -183,7 +186,7 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     );
     // A direct path may be established and later lost before sampling;
     // success means a direct path was observed at any point in the run.
-    result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
+    result.direct_connection_success = Some(first_direct.is_some() || !selected_is_relay);
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {
         SelectedPath::Relay
