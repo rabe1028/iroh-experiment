@@ -65,6 +65,17 @@ fn main() -> Result<()> {
                         | Comparison::SameIpPortMissing
                 )
             });
+            // Port equality is measured only when the endpoint reported the
+            // port in x-observed-port; a missing header stays null
+            // (unmeasured) instead of being conflated with a measured
+            // mismatch.
+            result.observed_port_equal = comparison.as_ref().and_then(|c| match c {
+                Comparison::SameIpSamePort => Some(true),
+                Comparison::SameIpDifferentPort => Some(false),
+                // No x-observed-port to compare, or the IPs already differ:
+                // port equality stays unmeasured (null).
+                Comparison::SameIpPortMissing | Comparison::DifferentIp => None,
+            });
             result.probe_latency_ms = Some(obs.duration.as_millis() as u64);
             println!("OBSERVATION={}", serde_json::to_string(&obs)?);
             if let Some(c) = comparison {
