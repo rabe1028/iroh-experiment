@@ -69,8 +69,7 @@ fn main() -> Result<()> {
                     outcome.ever_relay_paths
                 ));
             } else if !outcome.receiver_confirmed {
-                result.failure_reason =
-                    Some("receiver never confirmed stream completion".into());
+                result.failure_reason = Some("receiver never confirmed stream completion".into());
             }
             println!("OUTCOME={}", serde_json::to_string(&outcome)?);
         }
@@ -155,9 +154,15 @@ async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState
         frame_payload_bytes: 1200,
         duration: Duration::from_secs(args.duration_secs),
     };
-    let (outcome, gate): (_, Arc<Mutex<MediaGate>>) =
-        run_sender_session(conn, cfg, usable[0].clone(), KNOWN_EPOCH, started_unix_ms, &token)
-        .await?;
+    let (outcome, gate): (_, Arc<Mutex<MediaGate>>) = run_sender_session(
+        conn,
+        cfg,
+        usable[0].clone(),
+        KNOWN_EPOCH,
+        started_unix_ms,
+        &token,
+    )
+    .await?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }

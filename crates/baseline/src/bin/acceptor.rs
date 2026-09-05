@@ -38,8 +38,7 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();
@@ -174,12 +173,11 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
         println!("TIME_TO_DIRECT_MS={}", ms.as_millis());
     }
 
-    let mut result =
-        common::new_result(
-            format!("baseline-accept-{}", run_suffix()),
-            "baseline",
-            network_profile,
-        );
+    let mut result = common::new_result(
+        format!("baseline-accept-{}", run_suffix()),
+        "baseline",
+        network_profile,
+    );
     result.direct_connection_success = first_direct.is_some() || !selected_is_relay;
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {

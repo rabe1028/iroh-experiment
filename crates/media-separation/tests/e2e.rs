@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use iroh::{endpoint::presets, EndpointAddr, RelayMode};
 use media_separation::{
-    request_candidates, run_receiver_session, run_sender_session, serve_candidates,
-    unix_millis,
+    request_candidates, run_receiver_session, run_sender_session, serve_candidates, unix_millis,
     validate_candidate, EndpointPair, GateState, SyntheticConfig, CONTROL_ALPN, MEDIA_ALPN,
 };
 
@@ -75,7 +74,9 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
             .collect::<Vec<_>>();
         let token = media_separation::session_token();
         let (mut s, mut r) = conn.accept_bi().await.unwrap();
-        serve_candidates(&mut r, &mut s, &cands, &token).await.unwrap();
+        serve_candidates(&mut r, &mut s, &cands, &token)
+            .await
+            .unwrap();
 
         let started = unix_millis();
         let media_incoming = rx_pair.media.accept().await.unwrap().accept().unwrap();
@@ -108,16 +109,10 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
     let media_addr = EndpointAddr::new(candidate.endpoint_id).with_ip_addr(candidate.addr);
     let media_conn = tx_pair.media.connect(media_addr, MEDIA_ALPN).await.unwrap();
 
-    let (outcome, gate) = run_sender_session(
-        media_conn,
-        cfg(3),
-        candidate,
-        0,
-        unix_millis(),
-        &token,
-    )
-    .await
-    .unwrap();
+    let (outcome, gate) =
+        run_sender_session(media_conn, cfg(3), candidate, 0, unix_millis(), &token)
+            .await
+            .unwrap();
 
     assert!(outcome.direct_connection_success);
     assert_eq!(outcome.ever_relay_paths, 0);
@@ -167,7 +162,9 @@ async fn killing_direct_path_stops_media_fail_closed() {
             .collect::<Vec<_>>();
         let token = media_separation::session_token();
         let (mut s, mut r) = conn.accept_bi().await.unwrap();
-        serve_candidates(&mut r, &mut s, &cands, &token).await.unwrap();
+        serve_candidates(&mut r, &mut s, &cands, &token)
+            .await
+            .unwrap();
 
         let media_conn = rx_pair
             .media
@@ -180,7 +177,9 @@ async fn killing_direct_path_stops_media_fail_closed() {
             .unwrap();
         // Long nominal stream; the fault injection below must cut it short.
         let started = unix_millis();
-        run_receiver_session(media_conn, started, &token).await.unwrap()
+        run_receiver_session(media_conn, started, &token)
+            .await
+            .unwrap()
     });
 
     let control_conn = tx_pair
@@ -213,16 +212,10 @@ async fn killing_direct_path_stops_media_fail_closed() {
         fault_conn.close(1u32.into(), b"fault-injection: link down");
     });
 
-    let (outcome, gate) = run_sender_session(
-        media_conn,
-        cfg(60),
-        candidate,
-        0,
-        unix_millis(),
-        &token,
-    )
-    .await
-    .unwrap();
+    let (outcome, gate) =
+        run_sender_session(media_conn, cfg(60), candidate, 0, unix_millis(), &token)
+            .await
+            .unwrap();
     injector.await.unwrap();
 
     // Fail-closed: streaming stopped well before the nominal duration, and

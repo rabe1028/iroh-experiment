@@ -260,7 +260,11 @@ where
 
 /// Receiver side of the control handshake: send our media candidates plus
 /// the one-shot session token the media handshake must present.
-pub async fn send_candidates<S>(stream: &mut S, cands: &[DirectCandidate], token: &str) -> Result<()>
+pub async fn send_candidates<S>(
+    stream: &mut S,
+    cands: &[DirectCandidate],
+    token: &str,
+) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin + Send,
 {
@@ -966,16 +970,14 @@ where
                 // Prefer the gate's stop reason: the monitor closes the
                 // connection when it latches Stopped, so a closed stream here
                 // usually means the gate cut the session, not the peer.
-                stats.stop_reason =
-                    gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
+                stats.stop_reason = gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
                 return Ok(stats);
             }
             return Err(e.into());
         }
         if let Err(e) = stream.flush().await {
             if is_closed(&e) {
-                stats.stop_reason =
-                    gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
+                stats.stop_reason = gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
                 return Ok(stats);
             }
             return Err(e.into());
@@ -1073,12 +1075,11 @@ pub async fn run_receiver_session(
         write_frame(&mut send, b"ready").await?;
         Ok::<_, anyhow::Error>((send, recv))
     };
-    let (mut send, recv) =
-        tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
-            .await
-            .map_err(|_| {
-                anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
-            })??;
+    let (mut send, recv) = tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .map_err(|_| {
+            anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
+        })??;
 
     let (stats, _next_seq) = receive_synthetic(recv, gate.clone(), state_rx).await?;
     let _ = send.shutdown().await;
@@ -1135,12 +1136,11 @@ pub async fn run_sender_session(
         anyhow::ensure!(ready == b"ready", "receiver not ready");
         Ok::<_, anyhow::Error>((send, recv))
     };
-    let (send, mut recv) =
-        tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
-            .await
-            .map_err(|_| {
-                anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
-            })??;
+    let (send, mut recv) = tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .map_err(|_| {
+            anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
+        })??;
 
     let stats = send_synthetic(send, cfg, gate.clone(), state_rx).await?;
     // Bounded: a receiver that finishes its stream but never closes its send
