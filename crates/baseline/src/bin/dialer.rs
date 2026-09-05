@@ -17,9 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{
-    new_result, ExperimentResult, BASELINE_ALPN, SelectedPath, TEST_PAYLOAD_BYTES,
-};
+use common::{new_result, ExperimentResult, SelectedPath, BASELINE_ALPN, TEST_PAYLOAD_BYTES};
 use iroh::endpoint::{PathEvent, RecvStream, SendStream};
 use iroh::EndpointId;
 use rand::RngCore;
@@ -55,8 +53,7 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();
@@ -216,10 +213,12 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     // success means a direct path was observed at any point in the run.
     result.direct_connection_success = first_direct.is_some() || selected_is_relay == Some(false);
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
-    result.selected_path = selected_is_relay.map(|is_relay| if is_relay {
-        SelectedPath::Relay
-    } else {
-        SelectedPath::DirectIp
+    result.selected_path = selected_is_relay.map(|is_relay| {
+        if is_relay {
+            SelectedPath::Relay
+        } else {
+            SelectedPath::DirectIp
+        }
     });
     // The plan's direct_path_rtt_ms is the RTT of an observed direct path;
     // a relay path's RTT (including a direct -> relay fallback) must not be
