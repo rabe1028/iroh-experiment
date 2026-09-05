@@ -9,9 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{
-    new_result, ExperimentResult, BASELINE_ALPN, SelectedPath, TEST_PAYLOAD_BYTES,
-};
+use common::{new_result, ExperimentResult, SelectedPath, BASELINE_ALPN, TEST_PAYLOAD_BYTES};
 use iroh::endpoint::PathEvent;
 use iroh::EndpointId;
 use rand::RngCore;
@@ -44,8 +42,7 @@ struct Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
     let args = Args::parse();

@@ -288,7 +288,10 @@ where
     S: AsyncWrite + Unpin,
 {
     write_status(stream, status).await?;
-    stream.shutdown().await.context("finish write side after terminal status")
+    stream
+        .shutdown()
+        .await
+        .context("finish write side after terminal status")
 }
 
 /// Gateway-side handler for one tunnelled stream.
@@ -329,7 +332,8 @@ where
         return Ok(TunnelStatus::UnknownService);
     };
 
-    let mut up = match tokio::time::timeout(UPSTREAM_DIAL_TIMEOUT, TcpStream::connect(&target)).await
+    let mut up = match tokio::time::timeout(UPSTREAM_DIAL_TIMEOUT, TcpStream::connect(&target))
+        .await
     {
         Ok(Ok(up)) => up,
         Ok(Err(e)) => {
@@ -435,15 +439,15 @@ mod tests {
     #[test]
     fn upstream_validation_rejects_unusable_targets() {
         for addr in [
-            ":80",        // empty host (web=:80)
-            "web:port",   // non-numeric port
-            "host:",      // empty port
-            "host",       // missing :port entirely
-            "host:0",     // port 0 is not dialable
-            "[::1:8080",  // unterminated IPv6 literal
-            "[::1]x:80",  // junk after the literal
+            ":80",            // empty host (web=:80)
+            "web:port",       // non-numeric port
+            "host:",          // empty port
+            "host",           // missing :port entirely
+            "host:0",         // port 0 is not dialable
+            "[::1:8080",      // unterminated IPv6 literal
+            "[::1]x:80",      // junk after the literal
             "[localhost]:80", // brackets around a non-IPv6 host
-            "::1:8080",   // unbracketed IPv6 literal
+            "::1:8080",       // unbracketed IPv6 literal
         ] {
             assert!(spec(addr).is_err(), "must reject {addr}");
         }

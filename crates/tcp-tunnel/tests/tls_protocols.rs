@@ -17,7 +17,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use common::{connect_tunnel, service_map};
-use http::{HeaderMap, Method, Request, Response, StatusCode};use tokio::net::TcpListener;
+use http::{HeaderMap, Method, Request, Response, StatusCode};
+use tokio::net::TcpListener;
 use tokio_stream::StreamExt;
 
 /// Host name shared by the certificate SAN, the TLS client's SNI, and the
@@ -38,20 +39,18 @@ type H2Handler = Arc<
 
 /// Bind a TLS LAN service on loopback that terminates TLS with ALPN `h2`
 /// and serves one h2 connection per accepted TCP connection, handing each
-/// request stream to `handler`. `snis` lists the certificate hostnames. The
-/// `sni` parameter is the name the client connects with. Returns the service
-/// address and the certificate to trust as a client-side root.
+/// request stream to `handler`. `snis` lists the certificate hostnames.
+/// Returns the service address and the certificate to trust as a
+/// client-side root.
 async fn spawn_h2_tls_service_with_sni(
     handler: H2Handler,
     snis: Vec<String>,
-    sni: &str,
 ) -> Result<(String, rustls::pki_types::CertificateDer<'static>)> {
-    let cert = rcgen::generate_simple_self_signed(snis)
-        .context("generate self-signed cert")?;
+    let cert = rcgen::generate_simple_self_signed(snis).context("generate self-signed cert")?;
     let cert_der = cert.cert.der().clone();
-    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()),
-    );
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        cert.key_pair.serialize_der(),
+    ));
     let mut server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der.clone()], key)
@@ -94,13 +93,6 @@ async fn tls_h2_session(
     Ok(sender)
 }
 
-/// Default LAN service: certificate and SNI both use [`HOST`].
-async fn spawn_h2_tls_service(
-    handler: H2Handler,
-) -> Result<(String, rustls::pki_types::CertificateDer<'static>)> {
-    spawn_h2_tls_service_with_sni(handler, vec![HOST.to_string()], HOST).await
-}
-
 /// Bring up one TLS(h2) service behind the tunnel and connect with SNI
 /// `sni` (certificate SAN must cover it); the request URL keeps the original
 /// origin hostname, as real clients do through the tunnel's local listener.
@@ -118,7 +110,7 @@ async fn tls_h2_session_with_sni(
     } else {
         vec![sni.to_string()]
     };
-    let (service_addr, cert) = spawn_h2_tls_service_with_sni(handler, snis, sni).await?;
+    let (service_addr, cert) = spawn_h2_tls_service_with_sni(handler, snis).await?;
     let services = service_map(&[format!("{service_id}={service_addr}")])?;
     let app_stream = connect_tunnel(&services, service_id).await?;
 
@@ -129,8 +121,8 @@ async fn tls_h2_session_with_sni(
         .with_no_client_auth();
     client_config.alpn_protocols = vec![b"h2".to_vec()];
     let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
-    let server_name = rustls::pki_types::ServerName::try_from(sni.to_string())
-        .context("server name")?;
+    let server_name =
+        rustls::pki_types::ServerName::try_from(sni.to_string()).context("server name")?;
     let tls = connector
         .connect(server_name, app_stream)
         .await
@@ -143,8 +135,9 @@ async fn tls_h2_session_with_sni(
         Some(b"h2".as_slice()),
         "TLS through the tunnel must negotiate h2 via ALPN"
     );
-    let (request_sender, connection) =
-        h2::client::handshake(tls).await.context("h2 client handshake")?;
+    let (request_sender, connection) = h2::client::handshake(tls)
+        .await
+        .context("h2 client handshake")?;
     tokio::spawn(async move {
         let _ = connection.await;
     });

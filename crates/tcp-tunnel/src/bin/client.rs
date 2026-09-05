@@ -79,7 +79,12 @@ async fn run(args: &Args) -> Result<()> {
         .context(format!("bind {}", args.listen))?;
 
     let conn: SharedConn = Arc::new(Mutex::new(None));
-    println!("LISTENING={}", listener.local_addr().context("query bound listener address")?);
+    println!(
+        "LISTENING={}",
+        listener
+            .local_addr()
+            .context("query bound listener address")?
+    );
     println!("GATEWAY={target}");
     println!("SERVICE={}", args.service);
     // Print the client's own ID: with a fresh --key-file the operator needs
@@ -119,9 +124,7 @@ async fn tunnel_one(
     let gateway = get_or_dial(endpoint, target, conn).await?;
     let (send, recv) = tokio::time::timeout(OPEN_STREAM_TIMEOUT, gateway.open_bi())
         .await
-        .map_err(|_| {
-            anyhow::anyhow!("tunnel handshake timed out waiting for stream capacity")
-        })?
+        .map_err(|_| anyhow::anyhow!("tunnel handshake timed out waiting for stream capacity"))?
         .context("open_bi failed")?;
     let mut pair = StreamPair::new(send, recv);
 
@@ -207,7 +210,6 @@ async fn get_or_dial(
     }
 }
 
-
 /// Load the client's secret key from `path`, creating it owner-only on
 /// first use, so the EndpointId (and the gateway's --allow-endpoint entry)
 /// survives client restarts.
@@ -234,7 +236,8 @@ fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
                     .mode(0o600)
                     .open(path)
                     .context("create client key file")?;
-                f.write_all(&key.to_bytes()).context("write client key file")?;
+                f.write_all(&key.to_bytes())
+                    .context("write client key file")?;
             }
             #[cfg(not(unix))]
             std::fs::write(path, key.to_bytes()).context("write client key file")?;
@@ -248,7 +251,9 @@ fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
 #[cfg(unix)]
 fn restrict_key_permissions(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::metadata(path).context("stat client key file")?.permissions();
+    let perms = std::fs::metadata(path)
+        .context("stat client key file")?
+        .permissions();
     if perms.mode() & 0o077 != 0 {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .context("restrict client key file permissions")?;

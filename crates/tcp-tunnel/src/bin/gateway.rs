@@ -86,12 +86,16 @@ struct AllowRule {
 fn parse_allow_rule(raw: &str) -> Result<AllowRule> {
     if let Some((id, service)) = raw.split_once('=') {
         Ok(AllowRule {
-            endpoint: id.parse().with_context(|| format!("invalid EndpointId in {raw:?}"))?,
+            endpoint: id
+                .parse()
+                .with_context(|| format!("invalid EndpointId in {raw:?}"))?,
             service: Some(service.to_string()),
         })
     } else {
         Ok(AllowRule {
-            endpoint: raw.parse().with_context(|| format!("invalid EndpointId in {raw:?}"))?,
+            endpoint: raw
+                .parse()
+                .with_context(|| format!("invalid EndpointId in {raw:?}"))?,
             service: None,
         })
     }
@@ -127,7 +131,8 @@ fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
                     .mode(0o600)
                     .open(path)
                     .context("create gateway key file")?;
-                f.write_all(&key.to_bytes()).context("write gateway key file")?;
+                f.write_all(&key.to_bytes())
+                    .context("write gateway key file")?;
             }
             #[cfg(not(unix))]
             std::fs::write(path, key.to_bytes()).context("write gateway key file")?;
@@ -141,7 +146,9 @@ fn load_or_create_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
 #[cfg(unix)]
 fn restrict_key_permissions(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::metadata(path).context("stat gateway key file")?.permissions();
+    let perms = std::fs::metadata(path)
+        .context("stat gateway key file")?
+        .permissions();
     if perms.mode() & 0o077 != 0 {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .context("restrict gateway key file permissions")?;

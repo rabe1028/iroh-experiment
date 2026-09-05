@@ -16,7 +16,9 @@ mod common;
 use anyhow::Result;
 use common::connect_tunnel;
 use rand::RngCore;
-use tcp_tunnel::{drive_client, read_status, serve_stream, write_request, ServiceMap, TunnelStatus};
+use tcp_tunnel::{
+    drive_client, read_status, serve_stream, write_request, ServiceMap, TunnelStatus,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::net::TcpListener;
 
@@ -404,9 +406,7 @@ async fn drive_client_byte_counters_follow_direction() -> Result<()> {
     // the byte stream).
     let mut tunnel = raw_tunnel(&services);
     let (mut app, mut local) = tokio::io::duplex(64 * 1024);
-    let driver = tokio::spawn(async move {
-        drive_client(&mut tunnel, &mut local, "asym").await
-    });
+    let driver = tokio::spawn(async move { drive_client(&mut tunnel, &mut local, "asym").await });
     app.write_all(&[0u8; 100]).await?;
     let mut got = vec![0u8; 7000];
     app.read_exact(&mut got).await?;
