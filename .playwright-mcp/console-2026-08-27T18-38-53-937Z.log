@@ -1,0 +1,7 @@
+[   36307ms] [WARNING] crbug/1173575, non-JS module files deprecated. @ file:///Users/rabe/ghq/github.com/rabe1028/iroh-experiment__tcp-tunnel-pr/crates/tcp-tunnel/tests/:231
+[   87975ms] [WARNING] crbug/1173575, non-JS module files deprecated. @ file:///Users/rabe/ghq/github.com/rabe1028/iroh-experiment__tcp-tunnel-pr/crates/:231
+[   88022ms] [WARNING] crbug/1173575, non-JS module files deprecated. @ file:///Users/rabe/ghq/github.com/rabe1028/iroh-experiment__tcp-tunnel-pr/crates/baseline//:231
+[   88065ms] [WARNING] crbug/1173575, non-JS module files deprecated. @ file:///Users/rabe/ghq/github.com/rabe1028/iroh-experiment__tcp-tunnel-pr/crates/common//:231
+[   88106ms] [WARNING] crbug/1173575, non-JS module files deprecated. @ file:///Users/rabe/ghq/github.com/rabe1028/iroh-experiment__tcp-tunnel-pr/crates/tcp-tunnel//:231
+[   95270ms] [WARNING] crbug/1173575, non-JS module files deprecated. @ file:///Users/rabe/ghq/github.com/rabe1028/iroh-experiment__tcp-tunnel-pr/crates/common/src/:231
+[   95311ms] [WARNING] crbug/1173575, non-JS module files deprecated. @ file:///Users/rabe/ghq/github.com/rabe1028/iroh-experiment__tcp-tunnel-pr/crates/tcp-tunnel/src/:231
