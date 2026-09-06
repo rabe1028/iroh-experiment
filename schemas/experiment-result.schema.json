@@ -7,6 +7,7 @@
   "required": [
     "schema_version",
     "run_id",
+    "endpoint_role",
     "timestamp",
     "iroh_version",
     "method",
@@ -17,6 +18,7 @@
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
     "run_id": { "type": "string" },
+    "endpoint_role": { "type": "string", "enum": ["acceptor", "dialer"] },
     "timestamp": { "type": "string", "format": "date-time" },
     "git_revision": { "type": ["string", "null"] },
     "iroh_version": { "type": "string" },
@@ -34,6 +36,7 @@
         { "type": "null" }
       ]
     },
+    "direct_path_rtt_ms": { "type": ["integer", "null"], "minimum": 0 },
     "relay_control_tx_bytes": { "type": ["integer", "null"], "minimum": 0 },
     "relay_control_rx_bytes": { "type": ["integer", "null"], "minimum": 0 },
     "relay_media_tx_bytes": { "type": ["integer", "null"], "minimum": 0 },
