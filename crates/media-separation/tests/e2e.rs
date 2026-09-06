@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use iroh::{endpoint::presets, EndpointAddr, RelayMode};
 use media_separation::{
-    request_candidates, run_receiver_session, run_sender_session, serve_candidates,
+    request_candidates, run_receiver_session, run_sender_session, serve_candidates, unix_millis,
     validate_candidate, EndpointPair, GateState, SyntheticConfig, CONTROL_ALPN, MEDIA_ALPN,
 };
 
@@ -57,7 +57,7 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
         .unwrap();
     let rx_control_id = rx_pair.control.id();
 
-    tokio::spawn(async move {
+    let rx_handle = tokio::spawn(async move {
         let incoming = rx_pair.control.accept().await.unwrap().accept().unwrap();
         let conn = incoming.await.unwrap();
         let cands = rx_pair
@@ -72,12 +72,18 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
                 )
             })
             .collect::<Vec<_>>();
+        let token = media_separation::session_token();
         let (mut s, mut r) = conn.accept_bi().await.unwrap();
-        serve_candidates(&mut r, &mut s, &cands).await.unwrap();
+        serve_candidates(&mut r, &mut s, &cands, &token)
+            .await
+            .unwrap();
 
+        let started = unix_millis();
         let media_incoming = rx_pair.media.accept().await.unwrap().accept().unwrap();
         let media_conn = media_incoming.await.unwrap();
-        let (outcome, _gate) = run_receiver_session(media_conn, cfg(3)).await.unwrap();
+        let (outcome, _gate) = run_receiver_session(media_conn, started, &token)
+            .await
+            .unwrap();
         assert!(outcome.direct_connection_success);
         assert_eq!(outcome.ever_relay_paths, 0);
     });
@@ -92,7 +98,7 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
         .await
         .unwrap();
     let (mut ctl_send, mut ctl_recv) = control_conn.open_bi().await.unwrap();
-    let cands = request_candidates(&mut ctl_send, &mut ctl_recv)
+    let (cands, token) = request_candidates(&mut ctl_send, &mut ctl_recv)
         .await
         .unwrap();
     assert!(!cands.is_empty());
@@ -103,9 +109,10 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
     let media_addr = EndpointAddr::new(candidate.endpoint_id).with_ip_addr(candidate.addr);
     let media_conn = tx_pair.media.connect(media_addr, MEDIA_ALPN).await.unwrap();
 
-    let (outcome, gate) = run_sender_session(media_conn, cfg(3), candidate, 0)
-        .await
-        .unwrap();
+    let (outcome, gate) =
+        run_sender_session(media_conn, cfg(3), candidate, 0, unix_millis(), &token)
+            .await
+            .unwrap();
 
     assert!(outcome.direct_connection_success);
     assert_eq!(outcome.ever_relay_paths, 0);
@@ -114,6 +121,9 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
         gate.lock().unwrap().state(),
         GateState::DirectReady | GateState::Stopped(_)
     ));
+    // Propagate receiver-side panics / failed assertions: a detached task
+    // would be aborted by the runtime before its failure is observed.
+    rx_handle.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -150,8 +160,11 @@ async fn killing_direct_path_stops_media_fail_closed() {
                 )
             })
             .collect::<Vec<_>>();
+        let token = media_separation::session_token();
         let (mut s, mut r) = conn.accept_bi().await.unwrap();
-        serve_candidates(&mut r, &mut s, &cands).await.unwrap();
+        serve_candidates(&mut r, &mut s, &cands, &token)
+            .await
+            .unwrap();
 
         let media_conn = rx_pair
             .media
@@ -163,7 +176,10 @@ async fn killing_direct_path_stops_media_fail_closed() {
             .await
             .unwrap();
         // Long nominal stream; the fault injection below must cut it short.
-        run_receiver_session(media_conn, cfg(60)).await.unwrap()
+        let started = unix_millis();
+        run_receiver_session(media_conn, started, &token)
+            .await
+            .unwrap()
     });
 
     let control_conn = tx_pair
@@ -175,7 +191,7 @@ async fn killing_direct_path_stops_media_fail_closed() {
         .await
         .unwrap();
     let (mut ctl_send, mut ctl_recv) = control_conn.open_bi().await.unwrap();
-    let cands = request_candidates(&mut ctl_send, &mut ctl_recv)
+    let (cands, token) = request_candidates(&mut ctl_send, &mut ctl_recv)
         .await
         .unwrap();
     let candidate = cands.first().unwrap().clone();
@@ -196,9 +212,10 @@ async fn killing_direct_path_stops_media_fail_closed() {
         fault_conn.close(1u32.into(), b"fault-injection: link down");
     });
 
-    let (outcome, gate) = run_sender_session(media_conn, cfg(60), candidate, 0)
-        .await
-        .unwrap();
+    let (outcome, gate) =
+        run_sender_session(media_conn, cfg(60), candidate, 0, unix_millis(), &token)
+            .await
+            .unwrap();
     injector.await.unwrap();
 
     // Fail-closed: streaming stopped well before the nominal duration, and

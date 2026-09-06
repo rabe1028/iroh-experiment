@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{new_result, RunFailure};
-use media_separation::{DirectCandidate, EndpointPair, SyntheticConfig, CONTROL_ALPN, MEDIA_ALPN};
+use common::new_result;
+use media_separation::{DirectCandidate, EndpointPair, CONTROL_ALPN, MEDIA_ALPN};
 
 #[derive(Parser)]
 struct Args {
@@ -30,6 +30,14 @@ struct Args {
     /// Candidate time-to-live advertised to the sender.
     #[arg(long, default_value_t = 30_000)]
     candidate_ttl_ms: u64,
+    /// Externally reachable address to advertise in addition to the local
+    /// interface addresses (repeatable). The local candidates alone are
+    /// private/interface addresses, so a sender outside the receiver's LAN
+    /// cannot dial them; supply e.g. the media endpoint's port behind a NAT
+    /// static mapping, or the address a STUN probe observed for this host
+    /// (use the media endpoint's port if the mapping preserves it).
+    #[arg(long = "advertise-addr")]
+    advertise_addrs: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -46,15 +54,20 @@ fn main() -> Result<()> {
     let mut result = new_result(
         format!("media-recv-{}", run_suffix()),
         "direct-media",
+        "receiver",
         &args.network_profile,
     );
     match outcome {
         Ok((outcome, gate_state)) => {
             result.direct_connection_success = Some(outcome.direct_connection_success);
             result.time_to_direct_ms = outcome.time_to_direct_ms;
-            result.payload_bytes = outcome.stream.bytes_on_wire;
+            // A successful run streamed only under a direct-selected gate.
+            if outcome.direct_connection_success {
+                result.selected_path = Some(common::SelectedPath::DirectIp);
+            }
+            result.payload_bytes = outcome.stream.payload_bytes;
             result.media_throughput_mbps = outcome.stream.throughput_mbps();
-            result.relay_media_rx_bytes = Some(outcome.relay_media_bytes);
+            result.relay_media_rx_bytes = outcome.relay_media_bytes;
             if outcome.ever_relay_paths > 0
                 || matches!(gate_state, media_separation::GateState::Stopped(_))
             {
@@ -70,10 +83,6 @@ fn main() -> Result<()> {
             );
         }
         Err(e) => {
-            // Null until the media accept is attempted; a failed accept stays
-            // false; a stream error after establishment stays true (the
-            // direct attempt itself succeeded).
-            result.direct_connection_success = e.direct_connection_success;
             result.failure_reason = Some(format!("{e:#}"));
         }
     }
@@ -86,35 +95,16 @@ fn main() -> Result<()> {
 
 async fn run(
     args: &Args,
-) -> Result<
-    (
-        media_separation::SessionOutcome,
-        media_separation::GateState,
-    ),
-    RunFailure,
-> {
-    // Control plane: failures here happen before any direct media attempt,
-    // so a failure record stays unattempted (direct_connection_success =
-    // null).
-    let pair = setup_control_plane(args).await?;
-
-    accept_media_and_measure(&pair, args).await
-}
-
-/// Bind the endpoint pair, publish media candidates over the control
-/// connection, and serve them to the sender.
-async fn setup_control_plane(args: &Args) -> anyhow::Result<EndpointPair> {
+) -> Result<(
+    media_separation::SessionOutcome,
+    media_separation::GateState,
+)> {
     let pair = EndpointPair::bind(iroh::endpoint::presets::N0).await?;
     pair.control.set_alpns(vec![CONTROL_ALPN.to_vec()]);
     pair.media.set_alpns(vec![MEDIA_ALPN.to_vec()]);
 
     println!("CONTROL_EP_ID={}", pair.control.id());
     println!("MEDIA_EP_ID={}", pair.media.id());
-    let addrs = pair.media_direct_addrs();
-    for addr in &addrs {
-        println!("MEDIA_ADDR={addr}");
-    }
-    anyhow::ensure!(!addrs.is_empty(), "media endpoint has no direct addresses");
 
     // Accept the control connection and publish candidates on it.
     let control_conn = pair
@@ -127,8 +117,17 @@ async fn setup_control_plane(args: &Args) -> anyhow::Result<EndpointPair> {
         .await
         .context("control connect failed")?;
 
+    // Snapshot the media addresses only now, right before advertising: an
+    // interface change while waiting for the dialer must not publish stale
+    // pre-wait addresses stamped as freshly observed for the whole TTL.
+    let addrs = pair.media_direct_addrs();
+    for addr in &addrs {
+        println!("MEDIA_ADDR={addr}");
+    }
+    anyhow::ensure!(!addrs.is_empty(), "media endpoint has no direct addresses");
+
     const EPOCH: u64 = 0;
-    let cands: Vec<DirectCandidate> = addrs
+    let mut cands: Vec<DirectCandidate> = addrs
         .iter()
         .map(|addr| {
             DirectCandidate::local(
@@ -139,29 +138,32 @@ async fn setup_control_plane(args: &Args) -> anyhow::Result<EndpointPair> {
             )
         })
         .collect();
+    for raw in &args.advertise_addrs {
+        let addr: std::net::SocketAddr = raw
+            .parse()
+            .with_context(|| format!("invalid --advertise-addr {raw}"))?;
+        tracing::info!(addr = %addr, "advertising manual candidate");
+        cands.push(DirectCandidate::manual(
+            pair.media.id(),
+            addr,
+            Duration::from_millis(args.candidate_ttl_ms),
+            EPOCH,
+        ));
+    }
 
+    // One-shot session token: only whoever completes this control handshake
+    // can pass the media handshake (plan section 19 capability).
+    let token = media_separation::session_token();
     let (mut ctl_send, mut ctl_recv) = control_conn.accept_bi().await?;
-    media_separation::serve_candidates(&mut ctl_recv, &mut ctl_send, &cands)
+    media_separation::serve_candidates(&mut ctl_recv, &mut ctl_send, &cands, &token)
         .await
         .context("serve candidates")?;
-    Ok(pair)
-}
 
-/// Wait for the direct media connection and receive the stream. An accept
-/// error is a measured failed attempt (`Some(false)`); a stream error after
-/// the connection was established keeps the measured success (`Some(true)`).
-async fn accept_media_and_measure(
-    pair: &EndpointPair,
-    args: &Args,
-) -> Result<
-    (
-        media_separation::SessionOutcome,
-        media_separation::GateState,
-    ),
-    RunFailure,
-> {
-    // Wait for the media connection on the direct-only endpoint.
+    // Wait for the media connection on the direct-only endpoint. The origin
+    // for time_to_direct_ms is taken before waiting, so the measurement
+    // covers accept start to direct-ready rather than the stream duration.
     tracing::info!("waiting for media connection");
+    let started_unix_ms = media_separation::unix_millis();
     let conn = tokio::time::timeout(Duration::from_secs(60), async {
         pair.media
             .accept()
@@ -173,18 +175,10 @@ async fn accept_media_and_measure(
             .context("media connect failed")
     })
     .await
-    .context("timed out waiting for media connection")
-    .map_err(RunFailure::failed_direct)?
-    .map_err(RunFailure::failed_direct)?;
+    .context("timed out waiting for media connection")??;
 
-    let cfg = SyntheticConfig {
-        bitrate_bps: (args.bitrate_mbps * 1_000_000.0) as u64,
-        frame_payload_bytes: 1200,
-        duration: Duration::from_secs(args.duration_secs),
-    };
-    let (outcome, gate) = media_separation::run_receiver_session(conn, cfg)
-        .await
-        .map_err(RunFailure::direct_established)?;
+    let (outcome, gate) =
+        media_separation::run_receiver_session(conn, started_unix_ms, &token).await?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }

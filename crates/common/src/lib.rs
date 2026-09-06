@@ -35,6 +35,10 @@ pub enum SelectedPath {
 pub struct ExperimentResult {
     pub schema_version: u32,
     pub run_id: String,
+    /// Which endpoint of the pair produced this row ("acceptor" = Endpoint A
+    /// LAN gateway role, "dialer" = Endpoint B remote client role). One run
+    /// appends one row per endpoint under a shared run_id.
+    pub endpoint_role: String,
     #[serde(with = "rfc3339")]
     pub timestamp: SystemTime,
     pub git_revision: Option<String>,
@@ -58,6 +62,9 @@ pub struct ExperimentResult {
     pub direct_connection_success: Option<bool>,
     pub time_to_direct_ms: Option<u64>,
     pub selected_path: Option<SelectedPath>,
+    /// RTT of the selected path at the end of the run (plan section 10.2
+    /// `direct_path_rtt_ms`); null when no path was selected.
+    pub direct_path_rtt_ms: Option<u64>,
     // --- relay traffic (measured from PR 3/6 onwards) ---
     pub relay_control_tx_bytes: Option<u64>,
     pub relay_control_rx_bytes: Option<u64>,
@@ -75,14 +82,16 @@ pub struct ExperimentResult {
 pub fn new_result(
     run_id: impl Into<String>,
     method: &str,
+    endpoint_role: &str,
     network_profile: &str,
 ) -> ExperimentResult {
     ExperimentResult {
         // v2: direct_connection_success became nullable (unattempted vs failed).
         schema_version: 2,
         run_id: run_id.into(),
+        endpoint_role: endpoint_role.to_string(),
         timestamp: SystemTime::now(),
-        git_revision: None,
+        git_revision: git_revision(),
         iroh_version: "1.0.3".to_string(),
         method: method.to_string(),
         network_profile: network_profile.to_string(),
@@ -94,6 +103,7 @@ pub fn new_result(
         direct_connection_success: None,
         time_to_direct_ms: None,
         selected_path: None,
+        direct_path_rtt_ms: None,
         relay_control_tx_bytes: None,
         relay_control_rx_bytes: None,
         relay_media_tx_bytes: None,
@@ -177,6 +187,22 @@ mod rfc3339 {
         humantime::parse_rfc3339(&s)
             .map(|st| UNIX_EPOCH + st.duration_since(UNIX_EPOCH).unwrap_or_default())
             .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Short git revision of the working tree, recorded with each result row so
+/// published measurements tie back to the implementation that produced them.
+/// Null when run outside a git checkout.
+fn git_revision() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    let rev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !rev.is_empty() {
+        Some(rev)
+    } else {
+        None
     }
 }
 

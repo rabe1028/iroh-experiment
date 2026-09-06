@@ -49,6 +49,7 @@ fn main() -> Result<()> {
     let mut result = new_result(
         format!("h3-obs-{}", run_suffix()),
         "cloudflare-h3",
+        "observer",
         &args.network_profile,
     );
     match outcome {

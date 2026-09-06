@@ -319,6 +319,12 @@ pub fn encode_binding_error(code: u16, reason: &str, txn: &TransactionId) -> Vec
     let number = (code % 100) as u8;
     let mut value = vec![0x00, 0x00, class & 0x07, number];
     value.extend_from_slice(reason.as_bytes());
+    // RFC 5389 §15: attribute values are padded to a four-byte boundary.
+    // The padding counts toward the message length but not toward the
+    // attribute's own value length; skipping it makes the message length a
+    // non-multiple of four, which compliant peers reject.
+    let unpadded = value.len();
+    value.resize(unpadded.div_ceil(4) * 4, 0);
 
     let mut buf = Vec::with_capacity(HEADER_LEN + ATTR_HEADER_LEN + value.len());
     buf.extend_from_slice(&BINDING_ERROR.to_be_bytes());
@@ -327,7 +333,7 @@ pub fn encode_binding_error(code: u16, reason: &str, txn: &TransactionId) -> Vec
     buf.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
     buf.extend_from_slice(txn.as_bytes());
     buf.extend_from_slice(&ATTR_ERROR_CODE.to_be_bytes());
-    buf.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    buf.extend_from_slice(&(unpadded as u16).to_be_bytes());
     buf.extend_from_slice(&value);
     buf
 }

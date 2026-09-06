@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use common::{new_result, RunFailure};
+use common::new_result;
 use iroh::{EndpointAddr, EndpointId};
 use media_separation::{
     request_candidates, run_sender_session, EndpointPair, GateState, MediaGate, SyntheticConfig,
@@ -50,28 +50,31 @@ fn main() -> Result<()> {
     let mut result = new_result(
         format!("media-send-{}", run_suffix()),
         "direct-media",
+        "sender",
         &args.network_profile,
     );
     match outcome {
         Ok((outcome, gate_state)) => {
             result.direct_connection_success = Some(outcome.direct_connection_success);
             result.time_to_direct_ms = outcome.time_to_direct_ms;
-            result.payload_bytes = outcome.stream.bytes_on_wire;
+            // A successful run streamed only under a direct-selected gate.
+            if outcome.direct_connection_success {
+                result.selected_path = Some(common::SelectedPath::DirectIp);
+            }
+            result.payload_bytes = outcome.stream.payload_bytes;
             result.media_throughput_mbps = outcome.stream.throughput_mbps();
-            result.relay_media_tx_bytes = Some(outcome.relay_media_bytes);
+            result.relay_media_tx_bytes = outcome.relay_media_bytes;
             if outcome.ever_relay_paths > 0 || matches!(gate_state, GateState::Stopped(_)) {
                 result.failure_reason = Some(format!(
                     "fail-closed gate tripped: ever_relay_paths={} gate={gate_state:?}",
                     outcome.ever_relay_paths
                 ));
+            } else if !outcome.receiver_confirmed {
+                result.failure_reason = Some("receiver never confirmed stream completion".into());
             }
             println!("OUTCOME={}", serde_json::to_string(&outcome)?);
         }
         Err(e) => {
-            // Null until the media dial is attempted; a failed dial stays
-            // false; a stream error after establishment stays true (the
-            // direct attempt itself succeeded).
-            result.direct_connection_success = e.direct_connection_success;
             result.failure_reason = Some(format!("{e:#}"));
         }
     }
@@ -90,22 +93,10 @@ fn run_suffix() -> String {
         .to_string()
 }
 
-async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState), RunFailure> {
-    // Control plane + candidate validation: failures here happen before the
-    // direct media dial, so a failure record stays unattempted
-    // (direct_connection_success = null).
-    let (pair, candidate) = setup_control_plane(args).await?;
-
-    dial_media_and_stream(&pair, candidate, args).await
-}
-
-/// Bind endpoints, fetch the receiver's media candidates over the control
-/// connection, and validate them (fail-closed).
-async fn setup_control_plane(
-    args: &Args,
-) -> anyhow::Result<(EndpointPair, media_separation::DirectCandidate)> {
+async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState)> {
     let pair = EndpointPair::bind(iroh::endpoint::presets::N0).await?;
 
+    // --- control plane: fetch the receiver's media candidates ---
     let target: EndpointId = args.control_id.parse().context("invalid EndpointId")?;
     let control_conn = tokio::time::timeout(
         Duration::from_secs(30),
@@ -116,56 +107,63 @@ async fn setup_control_plane(
     .context("control connect failed")?;
 
     let (mut ctl_send, mut ctl_recv) = control_conn.open_bi().await?;
-    let cands = request_candidates(&mut ctl_send, &mut ctl_recv)
+    let (cands, token) = request_candidates(&mut ctl_send, &mut ctl_recv)
         .await
         .context("request candidates")?;
     anyhow::ensure!(!cands.is_empty(), "receiver published no candidates");
 
-    let candidate = cands
+    const KNOWN_EPOCH: u64 = 0;
+    // Validate every candidate from the known epoch and dial all of them:
+    // on a multi-homed receiver any single address may belong to an
+    // unreachable VPN, container, or interface, while a later advertised
+    // candidate is reachable. Putting all candidates into the EndpointAddr
+    // lets iroh race them instead of biasing direct results by candidate
+    // order.
+    let usable: Vec<&media_separation::DirectCandidate> = cands
         .iter()
-        .find(|c| !c.addr.ip().is_loopback() && c.network_epoch == KNOWN_EPOCH)
-        .or_else(|| cands.iter().find(|c| c.network_epoch == KNOWN_EPOCH))
-        .cloned()
-        .context("no candidate from a known epoch")?;
-    media_separation::validate_candidate(&candidate, [KNOWN_EPOCH])
-        .context("candidate rejected (fail-closed)")?;
-    Ok((pair, candidate))
-}
-
-/// The network epoch of the candidates this experiment exchanges.
-const KNOWN_EPOCH: u64 = 0;
-
-/// Dial the media endpoint directly and stream. A dial error is a measured
-/// failed attempt (`Some(false)`); a stream error after the connection was
-/// established keeps the measured success (`Some(true)`).
-async fn dial_media_and_stream(
-    pair: &EndpointPair,
-    candidate: media_separation::DirectCandidate,
-    args: &Args,
-) -> Result<(media_separation::SessionOutcome, GateState), RunFailure> {
-    tracing::info!(addr = %candidate.addr, "dialed media candidate");
+        .filter(|c| c.network_epoch == KNOWN_EPOCH)
+        .collect();
+    anyhow::ensure!(!usable.is_empty(), "no candidate from a known epoch");
+    for c in &usable {
+        media_separation::validate_candidate(c, [KNOWN_EPOCH])
+            .context("candidate rejected (fail-closed)")?;
+    }
+    let endpoint_id = usable[0].endpoint_id;
+    anyhow::ensure!(
+        usable.iter().all(|c| c.endpoint_id == endpoint_id),
+        "advertised candidates disagree on endpoint id"
+    );
+    for c in &usable {
+        tracing::info!(addr = %c.addr, source = ?c.source, "dialing media candidate");
+    }
 
     // --- media plane: direct-only dial ---
-    let media_addr = EndpointAddr::new(candidate.endpoint_id).with_ip_addr(candidate.addr);
+    let started_unix_ms = media_separation::unix_millis();
+    let media_addr = usable.iter().fold(EndpointAddr::new(endpoint_id), |a, c| {
+        a.with_ip_addr(c.addr)
+    });
     let conn = tokio::time::timeout(
         Duration::from_secs(30),
         pair.media.connect(media_addr, MEDIA_ALPN),
     )
     .await
-    .context("media connect timed out")
-    .map_err(RunFailure::failed_direct)?
-    .context("media connect failed")
-    .map_err(RunFailure::failed_direct)?;
+    .context("media connect timed out")?
+    .context("media connect failed")?;
 
     let cfg = SyntheticConfig {
         bitrate_bps: (args.bitrate_mbps * 1_000_000.0) as u64,
         frame_payload_bytes: 1200,
         duration: Duration::from_secs(args.duration_secs),
     };
-    let (outcome, gate): (_, Arc<Mutex<MediaGate>>) =
-        run_sender_session(conn, cfg, candidate.clone(), KNOWN_EPOCH)
-            .await
-            .map_err(RunFailure::direct_established)?;
+    let (outcome, gate): (_, Arc<Mutex<MediaGate>>) = run_sender_session(
+        conn,
+        cfg,
+        usable[0].clone(),
+        KNOWN_EPOCH,
+        started_unix_ms,
+        &token,
+    )
+    .await?;
     let state = gate.lock().unwrap().state();
     Ok((outcome, state))
 }

@@ -14,6 +14,11 @@
 //!
 //! The gateway only forwards to services listed in its [`ServiceMap`], so it
 //! is never an open proxy (plan section 19).
+//!
+//! Known limitation: the wire request carries only the protocol version and
+//! service id, so the third §19 authorization factor — a short-lived
+//! capability — is not implemented yet; an allowlisted endpoint key remains
+//! authorized until its rules are removed from the gateway config.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +34,7 @@ pub const TUNNEL_ALPN: &[u8] = b"iroh-experiment/tcp-tunnel/0";
 pub const PROTOCOL_VERSION: u8 = 0;
 
 /// Maximum accepted length of a service id.
-const MAX_SERVICE_ID_LEN: u16 = 256;
+pub const MAX_SERVICE_ID_LEN: u16 = 256;
 
 /// Gateway response to a tunnel request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,17 +158,54 @@ impl ServiceMap {
             "invalid --service {spec:?}: expected name=host:port"
         ))?;
         anyhow::ensure!(!name.is_empty(), "empty service name in {spec:?}");
+        anyhow::ensure!(
+            name.len() <= MAX_SERVICE_ID_LEN as usize,
+            "service name exceeds {MAX_SERVICE_ID_LEN} bytes in {spec:?};              clients could never request it"
+        );
         self.validate_upstream(addr)
             .context(format!("invalid upstream for service {name:?}"))?;
         self.0.insert(name.to_string(), Target(addr.to_string()));
         Ok(())
     }
 
-    /// Reject obviously invalid upstreams early so typos fail at startup.
+    /// Reject obviously invalid upstreams early so typos fail at startup:
+    /// the host must be nonempty and the authority must be syntactically
+    /// sound, not just the numeric suffix after the last colon.
     fn validate_upstream(&self, addr: &str) -> Result<()> {
-        let (_, port) = addr.rsplit_once(':').context("missing :port")?;
-        port.parse::<u16>()
+        let (host, port) = addr.rsplit_once(':').context("missing :port")?;
+        let host = if let Some(rest) = host.strip_prefix('[') {
+            // Bracketed IPv6 literal: `[::1]:8080`.
+            let end = rest
+                .rfind(']')
+                .context("unterminated IPv6 literal in upstream address")?;
+            anyhow::ensure!(
+                end == rest.len() - 1,
+                "characters after ']' in IPv6 upstream address {addr:?}"
+            );
+            // Brackets are only valid around a real IPv6 literal, so
+            // `[localhost]:80`-style configs fail here instead of at dial.
+            let literal: std::net::Ipv6Addr = rest[..end].parse().with_context(|| {
+                format!("bracketed upstream host in {addr:?} is not an IPv6 literal")
+            })?;
+            let _ = literal;
+            &rest[..end]
+        } else {
+            // Without brackets, a second colon means an unbracketed IPv6
+            // literal leaking into the host part.
+            anyhow::ensure!(
+                !host.contains(':'),
+                "IPv6 upstream addresses must be bracketed: {addr:?}"
+            );
+            host
+        };
+        anyhow::ensure!(!host.is_empty(), "upstream host is empty in {addr:?}");
+        let port: u16 = port
+            .parse()
             .context(format!("port {port:?} is not a valid u16"))?;
+        // Destination port 0 is not dialable: a listener there would have
+        // bound an ephemeral port, so a route like host:0 can only ever
+        // answer UpstreamUnreachable.
+        anyhow::ensure!(port != 0, "upstream port 0 is not usable in {addr:?}");
         Ok(())
     }
 
@@ -237,6 +279,21 @@ impl AsyncWrite for StreamPair {
     }
 }
 
+/// Send a terminal status and finish the write side so the client reliably
+/// reads it (also used by the gateway for the pre-auth rejection reply): with a real `StreamPair`, returning while the send side is
+/// unfinished drops an unfinished QUIC SendStream, which can reset the
+/// stream before the status is delivered.
+pub async fn send_terminal_status<S>(stream: &mut S, status: TunnelStatus) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    write_status(stream, status).await?;
+    stream
+        .shutdown()
+        .await
+        .context("finish write side after terminal status")
+}
+
 /// Gateway-side handler for one tunnelled stream.
 ///
 /// Reads the handshake, routes to the allowlisted upstream over TCP, then
@@ -245,30 +302,49 @@ impl AsyncWrite for StreamPair {
 ///
 /// Generic over the stream type so tests can run it against in-memory
 /// transports instead of live iroh connections.
+/// Upper bound for reading a tunnel request. A stream that sends only part
+/// of the request must not park the serving task indefinitely.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Upper bound for dialing the LAN upstream. A target that silently drops
+/// SYNs (or a stalled resolver) must not leave the client without a status.
+const UPSTREAM_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub async fn serve_stream<S>(stream: &mut S, services: &ServiceMap) -> Result<TunnelStatus>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let service_id = match read_request(stream).await {
-        Ok(id) => id,
-        Err(e) => {
-            let _ = write_status(stream, TunnelStatus::BadRequest).await;
+    let service_id = match tokio::time::timeout(REQUEST_TIMEOUT, read_request(stream)).await {
+        Ok(Ok(id)) => id,
+        Ok(Err(e)) => {
+            let _ = send_terminal_status(stream, TunnelStatus::BadRequest).await;
             return Err(e.context("malformed tunnel request"));
+        }
+        Err(_) => {
+            let _ = send_terminal_status(stream, TunnelStatus::BadRequest).await;
+            return Err(anyhow::anyhow!("tunnel request timed out"));
         }
     };
 
     let Some(target) = services.get(&service_id).map(str::to_owned) else {
         tracing::warn!(service = %service_id, "rejected unknown service");
-        write_status(stream, TunnelStatus::UnknownService).await?;
+        send_terminal_status(stream, TunnelStatus::UnknownService).await?;
         return Ok(TunnelStatus::UnknownService);
     };
 
-    let mut up = match TcpStream::connect(&target).await {
-        Ok(up) => up,
-        Err(e) => {
+    let mut up = match tokio::time::timeout(UPSTREAM_DIAL_TIMEOUT, TcpStream::connect(&target))
+        .await
+    {
+        Ok(Ok(up)) => up,
+        Ok(Err(e)) => {
             tracing::warn!(service = %service_id, target = %target, "upstream dial failed");
-            write_status(stream, TunnelStatus::UpstreamUnreachable).await?;
+            send_terminal_status(stream, TunnelStatus::UpstreamUnreachable).await?;
             return Err(anyhow::Error::new(e)).with_context(|| format!("dial upstream {target}"));
+        }
+        Err(_) => {
+            tracing::warn!(service = %service_id, target = %target, "upstream dial timed out");
+            send_terminal_status(stream, TunnelStatus::UpstreamUnreachable).await?;
+            return Err(anyhow::anyhow!("dial upstream {target} timed out"));
         }
     };
 
@@ -286,29 +362,94 @@ where
     }
 }
 
+/// Bytes moved through one tunnelled stream, by direction.
+///
+/// Named fields (not a bare tuple) so an upload/download swap is a type
+/// error rather than a silent mislabel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteCounts {
+    /// Bytes sent from the client towards the gateway (upload).
+    pub to_gateway: u64,
+    /// Bytes received from the gateway by the client (download).
+    pub from_gateway: u64,
+}
+
 /// Client-side handler for one tunnelled stream.
 ///
 /// Runs the handshake for `service_id` on an already-open stream and, on
 /// success, pipes raw bytes between `stream` and `local` until both sides
-/// close. Returns `(bytes_to_gateway, bytes_from_gateway)`.
+/// close.
+/// Upper bound for the client-side request/status exchange. A gateway that
+/// accepts the stream but stalls before its status (other streams keeping the
+/// shared QUIC connection alive) must not park the client task and its local
+/// socket forever; the tunnel copy itself stays unbounded.
+///
+/// Strictly greater than the gateway's REQUEST_TIMEOUT +
+/// UPSTREAM_DIAL_TIMEOUT: the client deadline starts before the request is
+/// written while the gateway's dial deadline starts only after reading it, so
+/// an equal deadline would usually expire first and the client would never
+/// receive the gateway's UpstreamUnreachable terminal status.
+const CLIENT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 pub async fn drive_client<S, L>(
     stream: &mut S,
     local: &mut L,
     service_id: &str,
-) -> Result<(u64, u64)>
+) -> Result<ByteCounts>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     L: AsyncRead + AsyncWrite + Unpin,
 {
-    write_request(stream, service_id).await?;
-    let status = read_status(stream).await?;
+    let status = tokio::time::timeout(CLIENT_HANDSHAKE_TIMEOUT, async {
+        write_request(stream, service_id).await?;
+        read_status(stream).await
+    })
+    .await
+    .context("tunnel handshake timed out")??;
     if status != TunnelStatus::Ok {
         anyhow::bail!(
             "gateway rejected service {service_id:?}: {}",
             status.message()
         );
     }
-    tokio::io::copy_bidirectional(stream, local)
+    let (from_gateway, to_gateway) = tokio::io::copy_bidirectional(stream, local)
         .await
-        .context("tunnel pipe failed")
+        .context("tunnel pipe failed")?;
+    Ok(ByteCounts {
+        to_gateway,
+        from_gateway,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(addr: &str) -> Result<ServiceMap> {
+        ServiceMap::from_specs([&format!("svc={addr}")])
+    }
+
+    #[test]
+    fn upstream_validation_accepts_usable_targets() {
+        for addr in ["127.0.0.1:8080", "camera.lan:80", "[::1]:8080"] {
+            assert!(spec(addr).is_ok(), "must accept {addr}");
+        }
+    }
+
+    #[test]
+    fn upstream_validation_rejects_unusable_targets() {
+        for addr in [
+            ":80",            // empty host (web=:80)
+            "web:port",       // non-numeric port
+            "host:",          // empty port
+            "host",           // missing :port entirely
+            "host:0",         // port 0 is not dialable
+            "[::1:8080",      // unterminated IPv6 literal
+            "[::1]x:80",      // junk after the literal
+            "[localhost]:80", // brackets around a non-IPv6 host
+            "::1:8080",       // unbracketed IPv6 literal
+        ] {
+            assert!(spec(addr).is_err(), "must reject {addr}");
+        }
+    }
 }

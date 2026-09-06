@@ -3277,10 +3277,17 @@ name = "tcp-tunnel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
+ "h2",
+ "http",
  "iroh",
  "rand 0.8.7",
+ "rcgen",
+ "rustls",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]

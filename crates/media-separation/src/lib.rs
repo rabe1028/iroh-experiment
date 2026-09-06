@@ -89,8 +89,41 @@ impl DirectCandidate {
         }
     }
 
+    /// Build a manually supplied, externally reachable candidate valid for
+    /// `ttl`.
+    ///
+    /// The local candidates from the media endpoint cover only the receiver's
+    /// own interfaces (mostly private addresses); a sender outside the LAN
+    /// needs an externally reachable address — e.g. the media port behind a
+    /// NAT static mapping, or the mapping a STUN probe observed — supplied
+    /// by the operator until the discovery chain (plan E4) automates it.
+    pub fn manual(endpoint_id: EndpointId, addr: SocketAddr, ttl: Duration, epoch: u64) -> Self {
+        let now_ms = unix_millis();
+        Self {
+            endpoint_id,
+            addr,
+            source: CandidateSource::Manual,
+            observed_at_unix_ms: now_ms,
+            expires_at_unix_ms: now_ms + ttl.as_millis() as u64,
+            network_epoch: epoch,
+        }
+    }
+
     pub fn is_expired(&self, now_unix_ms: u64) -> bool {
-        now_unix_ms >= self.expires_at_unix_ms
+        // Expiry relative to the candidate's own observation timestamp, not
+        // to the receiver's wall clock: comparing a receiver-built
+        // expires_at against the sender's clock rejects every fresh
+        // candidate whenever the sender runs behind by more than the
+        // transfer delay of the candidate exchange. The elapsed time is
+        // still measured on the sender's clock, so a skew slack is added to
+        // the threshold; host clocks must be within EXPIRY_SKEW_SLACK_MS of
+        // each other (NTP-normal hosts are off by well under a second).
+        const EXPIRY_SKEW_SLACK_MS: u64 = 10_000;
+        let ttl = self
+            .expires_at_unix_ms
+            .saturating_sub(self.observed_at_unix_ms);
+        let slack = EXPIRY_SKEW_SLACK_MS.min(ttl);
+        now_unix_ms.saturating_sub(self.observed_at_unix_ms) >= ttl + slack
     }
 }
 
@@ -116,7 +149,20 @@ pub fn validate_candidate(
     Ok(())
 }
 
-fn unix_millis() -> u64 {
+/// Random one-shot session token handed out with the candidates. The media
+/// handshake must present it, so a third party that reaches the media
+/// endpoint cannot hijack the accept slot of whoever completed the
+/// candidate exchange (plan section 19 capability).
+pub fn session_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Current unix time in ms (public so bins and tests share one clock for
+/// session-origin timestamps).
+pub fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -212,47 +258,58 @@ where
     Ok(buf)
 }
 
-/// Receiver side of the control handshake: send our media candidates.
-pub async fn send_candidates<S>(stream: &mut S, cands: &[DirectCandidate]) -> Result<()>
+/// Receiver side of the control handshake: send our media candidates plus
+/// the one-shot session token the media handshake must present.
+pub async fn send_candidates<S>(
+    stream: &mut S,
+    cands: &[DirectCandidate],
+    token: &str,
+) -> Result<()>
 where
     S: tokio::io::AsyncWrite + Unpin + Send,
 {
-    write_frame(stream, &serde_json::to_vec(cands)?).await
+    let reply = serde_json::json!({ "token": token, "candidates": cands });
+    write_frame(stream, &serde_json::to_vec(&reply)?).await
 }
 
 /// Sender side of the control handshake: request the peer's media
-/// candidates on an opened bidirectional stream.
+/// candidates and session token on an opened bidirectional stream.
 ///
-/// Protocol: empty request frame -> candidates JSON frame.
-pub async fn request_candidates<W, R>(w: &mut W, r: &mut R) -> Result<Vec<DirectCandidate>>
+/// Protocol: empty request frame -> {token, candidates} JSON frame.
+pub async fn request_candidates<W, R>(
+    w: &mut W,
+    r: &mut R,
+) -> Result<(Vec<DirectCandidate>, String)>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
     R: tokio::io::AsyncRead + Unpin + Send,
 {
     write_frame(w, b"").await.context("send request")?;
     let json = read_frame(r).await?;
-    serde_json::from_slice(&json).context("decode candidates")
+    #[derive(Deserialize)]
+    struct Reply {
+        token: String,
+        candidates: Vec<DirectCandidate>,
+    }
+    let reply: Reply = serde_json::from_slice(&json).context("decode candidates reply")?;
+    Ok((reply.candidates, reply.token))
 }
 
-/// Receiver side of the control handshake: answer a candidate request.
-pub async fn serve_candidates<R, W>(r: &mut R, w: &mut W, cands: &[DirectCandidate]) -> Result<()>
+/// Receiver side of the control handshake: answer a candidate request with
+/// the candidates and the given session token.
+pub async fn serve_candidates<R, W>(
+    r: &mut R,
+    w: &mut W,
+    cands: &[DirectCandidate],
+    token: &str,
+) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send,
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
     let req = read_frame(r).await.context("read request")?;
     anyhow::ensure!(req.is_empty(), "unexpected request payload");
-    send_candidates(w, cands).await
-}
-
-/// Sender side of the control handshake (standalone): receive the peer's
-/// media candidates from a stream already carrying the reply.
-pub async fn recv_candidates<S>(stream: &mut S) -> Result<Vec<DirectCandidate>>
-where
-    S: tokio::io::AsyncRead + Unpin + Send,
-{
-    let json = read_frame(stream).await?;
-    serde_json::from_slice(&json).context("decode candidates")
+    send_candidates(w, cands, token).await
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +370,10 @@ pub enum PathSignal {
 pub struct MediaGate {
     tx: watch::Sender<GateState>,
     ever_had_direct: bool,
+    /// Unix-ms of the first transition into [`GateState::DirectReady`]; the
+    /// session reports this relative to its pre-dial/accept start so
+    /// time_to_direct_ms is not contaminated by the stream duration.
+    direct_ready_at_unix_ms: Option<u64>,
 }
 
 impl MediaGate {
@@ -321,11 +382,17 @@ impl MediaGate {
         Self {
             tx,
             ever_had_direct: false,
+            direct_ready_at_unix_ms: None,
         }
     }
 
     pub fn state(&self) -> GateState {
         *self.tx.borrow()
+    }
+
+    /// When the gate first became direct-ready, in unix ms.
+    pub fn direct_ready_at_unix_ms(&self) -> Option<u64> {
+        self.direct_ready_at_unix_ms
     }
 
     /// Watch channel receiving every state change.
@@ -359,7 +426,17 @@ impl MediaGate {
                     return self.stop(StopReason::DirectPathLost);
                 }
                 if selected_direct {
-                    self.tx.send_replace(GateState::DirectReady);
+                    if self.direct_ready_at_unix_ms.is_none() {
+                        self.direct_ready_at_unix_ms = Some(unix_millis());
+                    }
+                    // Only notify on an actual transition: the monitor
+                    // reconciles every 50 ms, and re-sending an unchanged
+                    // DirectReady would wake the streaming loop's
+                    // state_rx.changed() select arm up to 20x/s, injecting
+                    // unpaced frames on top of the configured ticker.
+                    if !matches!(self.state(), GateState::DirectReady) {
+                        self.tx.send_replace(GateState::DirectReady);
+                    }
                 } else if self.state() == GateState::DirectReady {
                     // Selection left the direct path without a close event
                     // (e.g. migration window): treat as loss of usable path.
@@ -437,6 +514,16 @@ pub fn spawn_media_monitor(conn: &Connection, gate: Arc<Mutex<MediaGate>>) -> Me
 
 /// Reconciliation loop: snapshot -> gate, until the gate latches or the
 /// connection closes.
+/// Whether a path event references a relay transport address.
+fn event_has_relay_path(event: &iroh::endpoint::PathEvent) -> bool {
+    match event {
+        iroh::endpoint::PathEvent::Opened { remote_addr, .. }
+        | iroh::endpoint::PathEvent::Selected { remote_addr, .. }
+        | iroh::endpoint::PathEvent::Closed { remote_addr, .. } => remote_addr.is_relay(),
+        _ => false,
+    }
+}
+
 async fn monitor_loop(
     conn: &Connection,
     gate: &Arc<Mutex<MediaGate>>,
@@ -447,7 +534,22 @@ async fn monitor_loop(
 ) {
     loop {
         tokio::select! {
-            _ = events.next() => {}
+            maybe_event = events.next() => {
+                // Inspect the event itself, not just the next snapshot: a
+                // relay path that opens and closes entirely between two
+                // snapshots would otherwise never raise ever_relay_paths
+                // nor latch the gate.
+                if let Some(event) = maybe_event {
+                    if event_has_relay_path(&event) {
+                        ever_relay_count.fetch_add(1, Ordering::Relaxed);
+                        lock_gate(gate).apply(PathSignal::Snapshot {
+                            open_direct: 0,
+                            has_relay: true,
+                            selected_direct: false,
+                        });
+                    }
+                }
+            }
             _ = ticker.tick() => {}
             _ = conn.closed() => {
                 lock_gate(gate).apply(PathSignal::ConnectionClosed);
@@ -476,7 +578,13 @@ async fn monitor_loop(
             selected_direct,
         });
 
-        if matches!(lock_gate(gate).state(), GateState::Stopped(_)) {
+        if let GateState::Stopped(_) = lock_gate(gate).state() {
+            // The streaming task may be blocked in write_all on QUIC
+            // backpressure and cannot observe the latched gate until that
+            // write returns; close the connection so the fail-closed deadline
+            // is met by this transport reset instead of the transport
+            // timeout.
+            conn.close(1u32.into(), b"media gate stopped");
             break;
         }
         if *done_rx.borrow() {
@@ -556,9 +664,12 @@ impl SyntheticConfig {
 
     /// Interval between frames to hit `bitrate_bps` on average.
     pub fn frame_interval(&self) -> Duration {
-        let bytes_per_sec = (self.bitrate_bps / 8).max(1);
-        let frames_per_sec = (bytes_per_sec / self.frame_payload_bytes.max(1) as u64).max(1);
-        Duration::from_nanos(1_000_000_000u64.saturating_div(frames_per_sec))
+        // Fractional-second intervals for sub-one-frame-per-second rates:
+        // integer division floored them to one frame per second (a 1 Kbit/s
+        // target with 1200-byte frames would actually run at 9.6 Kbit/s).
+        let bits_per_frame =
+            (SyntheticConfig::HEADER_BYTES as u64 + self.frame_payload_bytes.max(1) as u64) * 8;
+        Duration::from_secs_f64(bits_per_frame as f64 / self.bitrate_bps.max(1) as f64)
     }
 }
 
@@ -566,21 +677,28 @@ impl SyntheticConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StreamStats {
     pub frames: u64,
+    /// Total bytes read/written on the wire, frame headers included.
     pub bytes_on_wire: u64,
+    /// Media payload bytes only (frame headers excluded); this is what the
+    /// result schema's payload_bytes reports.
+    pub payload_bytes: u64,
+    /// Unix ms of the first and last observed frame. On the receiver these
+    /// are local arrival times (measuring what the network actually
+    /// delivered); on the sender they are local send times.
     pub first_frame_unix_ms: Option<u64>,
     pub last_frame_unix_ms: Option<u64>,
     pub stop_reason: Option<StopReason>,
 }
 
 impl StreamStats {
-    /// Average throughput in Mbit/s across the observed frame span.
+    /// Average payload throughput in Mbit/s across the observed frame span.
     pub fn throughput_mbps(&self) -> Option<f64> {
         let first = self.first_frame_unix_ms?;
         let last = self.last_frame_unix_ms?;
         if last <= first || self.frames < 2 {
             return None;
         }
-        let bits = self.bytes_on_wire as f64 * 8.0;
+        let bits = self.payload_bytes as f64 * 8.0;
         Some(bits / ((last - first) as f64 / 1000.0) / 1_000_000.0)
     }
 }
@@ -588,8 +706,13 @@ impl StreamStats {
 /// One parsed inbound frame.
 struct Frame {
     seq: u32,
-    sent_ms: u64,
     wire_bytes: u64,
+    payload_bytes: u64,
+    /// Local arrival time, sampled inside the stream-owning reader task the
+    /// moment the frame completed: sampling at dequeue would record queued
+    /// frames at consumer-scheduling time, so the throughput span would
+    /// reflect the channel queue rather than what the wire delivered.
+    arrived_unix_ms: u64,
 }
 
 /// Read exactly one framed frame; `Ok(None)` on a clean FIN boundary.
@@ -604,14 +727,16 @@ where
         Err(e) => return Err(e),
     }
     let seq = u32::from_be_bytes(header[0..4].try_into().unwrap());
-    let sent_ms = u64::from_be_bytes(header[4..12].try_into().unwrap());
     let plen = u16::from_be_bytes(header[12..14].try_into().unwrap()) as usize;
     let mut payload = vec![0u8; plen];
     stream.read_exact(&mut payload).await?;
     Ok(Some(Frame {
         seq,
-        sent_ms,
         wire_bytes: (SyntheticConfig::HEADER_BYTES + plen) as u64,
+        payload_bytes: plen as u64,
+        // Arrival time of the completed frame, taken before it can sit in
+        // the channel queue.
+        arrived_unix_ms: unix_millis(),
     }))
 }
 
@@ -681,11 +806,15 @@ where
                         expected_seq = expected_seq.wrapping_add(1);
                         stats.frames += 1;
                         stats.bytes_on_wire += frame.wire_bytes;
+                        stats.payload_bytes += frame.payload_bytes;
+                        // Throughput must reflect what the network actually
+                        // delivered, not the sender's pacing: use the arrival
+                        // time sampled by the reader task, not dequeue time.
+                        let recv_ms = frame.arrived_unix_ms;
                         if stats.first_frame_unix_ms.is_none() {
-                            stats.first_frame_unix_ms =
-                                Some(frame.sent_ms.min(unix_millis()));
+                            stats.first_frame_unix_ms = Some(recv_ms);
                         }
-                        stats.last_frame_unix_ms = Some(frame.sent_ms.min(unix_millis()));
+                        stats.last_frame_unix_ms = Some(recv_ms);
                     }
                     Some(Err(_)) => {
                         // Abrupt cut: the monitor needs a moment to observe
@@ -747,18 +876,41 @@ pub async fn send_synthetic<S>(
 where
     S: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    // Block until direct is ready (bounded by the overall duration).
-    tokio::time::timeout(cfg.duration, async {
-        while !matches!(*state_rx.borrow_and_update(), GateState::DirectReady) {
-            state_rx
-                .changed()
-                .await
-                .map_err(|_| anyhow_err!("gate closed"))?;
+    // Block until direct is ready (bounded by the overall duration). A gate
+    // that latched Stopped before the first DirectReady snapshot is
+    // terminal: waiting for another watch update could delay the failure
+    // report until the duration expires (a full 60-minute traffic profile)
+    // instead of the required fail-closed interval.
+    enum WaitOutcome {
+        BecameReady,
+        StoppedEarly,
+        GateClosed,
+    }
+    let outcome = tokio::time::timeout(cfg.duration, async {
+        loop {
+            match *state_rx.borrow_and_update() {
+                GateState::DirectReady => return WaitOutcome::BecameReady,
+                GateState::Stopped(_) => return WaitOutcome::StoppedEarly,
+                GateState::AwaitingDirect => {}
+            }
+            if state_rx.changed().await.is_err() {
+                return WaitOutcome::GateClosed;
+            }
         }
-        Ok::<_, anyhow::Error>(())
     })
     .await
-    .context("timed out waiting for direct-ready")??;
+    .context("timed out waiting for direct-ready")?;
+    match outcome {
+        WaitOutcome::BecameReady => {}
+        WaitOutcome::StoppedEarly => {
+            let stats = StreamStats {
+                stop_reason: gate_stop_reason(&gate),
+                ..Default::default()
+            };
+            return Ok(stats);
+        }
+        WaitOutcome::GateClosed => return Err(anyhow_err!("gate closed")),
+    }
 
     let handle = tokio::spawn(streaming_task(stream, cfg, gate));
     handle.await.context("sender task panicked")?
@@ -786,6 +938,12 @@ where
         tokio::select! {
             _ = ticker.tick() => {}
             _ = state_rx.changed() => {}
+            // A frame interval longer than the remaining duration (sub-1 fps
+            // rates) must not delay completion until the next tick wakes the
+            // loop past the deadline.
+            _ = tokio::time::sleep_until(deadline) => {
+                break;
+            }
         }
         let state = *state_rx.borrow_and_update();
         if matches!(state, GateState::Stopped(_)) {
@@ -809,14 +967,17 @@ where
 
         if let Err(e) = stream.write_all(&frame).await {
             if is_closed(&e) {
-                stats.stop_reason = Some(StopReason::ConnectionClosed);
+                // Prefer the gate's stop reason: the monitor closes the
+                // connection when it latches Stopped, so a closed stream here
+                // usually means the gate cut the session, not the peer.
+                stats.stop_reason = gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
                 return Ok(stats);
             }
             return Err(e.into());
         }
         if let Err(e) = stream.flush().await {
             if is_closed(&e) {
-                stats.stop_reason = Some(StopReason::ConnectionClosed);
+                stats.stop_reason = gate_stop_reason(&gate).or(Some(StopReason::ConnectionClosed));
                 return Ok(stats);
             }
             return Err(e.into());
@@ -824,6 +985,7 @@ where
 
         stats.frames += 1;
         stats.bytes_on_wire += frame.len() as u64;
+        stats.payload_bytes += cfg.frame_payload_bytes as u64;
         if stats.first_frame_unix_ms.is_none() {
             stats.first_frame_unix_ms = Some(now_ms);
         }
@@ -866,29 +1028,58 @@ pub struct SessionOutcome {
     pub direct_connection_success: bool,
     pub time_to_direct_ms: Option<u64>,
     pub stream: StreamStats,
-    /// Always 0 in a compliant run; nonzero proves a relay path existed.
-    pub relay_media_bytes: u64,
+    /// Relay-side media bytes. Null: iroh 1.0.3 exposes no relay transport
+    /// byte counter, so this is unmeasured rather than zero;
+    /// `ever_relay_paths == 0` is the no-relay proof for a compliant run.
+    pub relay_media_bytes: Option<u64>,
     /// Count of relay paths ever observed by the monitor.
     pub ever_relay_paths: u64,
+    /// Sender-side only: whether the receiver read the stream to the end and
+    /// closed its half within the completion window. A run without this
+    /// confirmation must not serialize as an unqualified success.
+    pub receiver_confirmed: bool,
 }
+
+/// Upper bound for the post-connect media handshake (both roles). Without
+/// it, a peer that completes the QUIC connection but never opens the stream
+/// or completes the request/ready exchange would hang the one-shot binaries
+/// past the accept timeout and past the experiment's result recording.
+const MEDIA_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Run the receiver half of a media session on an accepted media connection.
 ///
-/// Handshake: sender sends an empty request frame, receiver answers `ready`,
-/// then the synthetic stream flows receiver-ward until done or stopped.
+/// `started_unix_ms` must be taken before waiting for the media connection,
+/// so `time_to_direct_ms` covers accept start to direct-ready instead of the
+/// stream duration.
+///
+/// Handshake: sender presents the session token received with the
+/// candidates, receiver answers `ready`, then the synthetic stream flows
+/// receiver-ward until done or stopped. The token binds the media accept
+/// slot to whoever completed the candidate exchange (plan section 19).
 pub async fn run_receiver_session(
     conn: Connection,
-    _cfg: SyntheticConfig,
+    started_unix_ms: u64,
+    expected_token: &str,
 ) -> Result<(SessionOutcome, Arc<Mutex<MediaGate>>)> {
-    let started = std::time::Instant::now();
     let gate = Arc::new(Mutex::new(MediaGate::new()));
     let state_rx = lock_gate(&gate).subscribe();
     let mut monitor = spawn_media_monitor(&conn, gate.clone());
 
-    let (mut send, mut recv) = conn.accept_bi().await.context("accept bi")?;
-    let req = read_frame(&mut recv).await.context("read media request")?;
-    anyhow::ensure!(req.is_empty(), "unexpected request payload");
-    write_frame(&mut send, b"ready").await?;
+    let handshake = async {
+        let (mut send, mut recv) = conn.accept_bi().await.context("accept bi")?;
+        let req = read_frame(&mut recv).await.context("read media request")?;
+        anyhow::ensure!(
+            req == expected_token.as_bytes(),
+            "media handshake token mismatch"
+        );
+        write_frame(&mut send, b"ready").await?;
+        Ok::<_, anyhow::Error>((send, recv))
+    };
+    let (mut send, recv) = tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .map_err(|_| {
+            anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
+        })??;
 
     let (stats, _next_seq) = receive_synthetic(recv, gate.clone(), state_rx).await?;
     let _ = send.shutdown().await;
@@ -898,14 +1089,19 @@ pub async fn run_receiver_session(
     monitor.finished().await;
     let ever_relay = monitor.ever_relay_paths();
 
+    // Sampled from the latched direct-ready transition, not from elapsed()
+    // at outcome construction (a 10 s stream would otherwise report ~10 s
+    // regardless of when the direct path became ready).
+    let time_to_direct_ms = lock_gate(&gate)
+        .direct_ready_at_unix_ms()
+        .map(|t| t.saturating_sub(started_unix_ms));
     let outcome = SessionOutcome {
         role: MediaRole::Receiver,
         direct_connection_success: stats.frames > 0,
-        time_to_direct_ms: stats
-            .first_frame_unix_ms
-            .map(|_| started.elapsed().as_millis() as u64),
-        relay_media_bytes: 0,
+        time_to_direct_ms,
+        relay_media_bytes: None,
         ever_relay_paths: ever_relay,
+        receiver_confirmed: true,
         stream: stats,
     };
     Ok((outcome, gate))
@@ -913,40 +1109,67 @@ pub async fn run_receiver_session(
 
 /// Run the sender half of a media session on an already-dialed media
 /// connection towards `candidate` (validated first, fail-closed).
+///
+/// `started_unix_ms` must be taken before dialing the media connection (see
+/// [`run_receiver_session`]).
 pub async fn run_sender_session(
     conn: Connection,
     cfg: SyntheticConfig,
     candidate: DirectCandidate,
     known_epoch: u64,
+    started_unix_ms: u64,
+    token: &str,
 ) -> Result<(SessionOutcome, Arc<Mutex<MediaGate>>)> {
     validate_candidate(&candidate, [known_epoch])?;
 
-    let started = std::time::Instant::now();
     let gate = Arc::new(Mutex::new(MediaGate::new()));
     let state_rx = lock_gate(&gate).subscribe();
     let mut monitor = spawn_media_monitor(&conn, gate.clone());
 
-    let (mut send, mut recv) = conn.open_bi().await.context("open bi")?;
-    write_frame(&mut send, b"").await.context("send request")?;
-    let ready = read_frame(&mut recv).await.context("read ready")?;
-    anyhow::ensure!(ready == b"ready", "receiver not ready");
+    let handshake = async {
+        let (mut send, recv) = conn.open_bi().await.context("open bi")?;
+        write_frame(&mut send, token.as_bytes())
+            .await
+            .context("send media handshake token")?;
+        let mut recv = recv;
+        let ready = read_frame(&mut recv).await.context("read ready")?;
+        anyhow::ensure!(ready == b"ready", "receiver not ready");
+        Ok::<_, anyhow::Error>((send, recv))
+    };
+    let (send, mut recv) = tokio::time::timeout(MEDIA_HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .map_err(|_| {
+            anyhow_err!("media handshake timed out after {MEDIA_HANDSHAKE_TIMEOUT:?}")
+        })??;
 
     let stats = send_synthetic(send, cfg, gate.clone(), state_rx).await?;
-    let _ = recv.read_to_end(64 * 1024).await;
+    // Bounded: a receiver that finishes its stream but never closes its send
+    // half must not hold the one-shot sender past its duration without a
+    // result row. A timeout or read error is recorded so a run without the
+    // receiver's confirmation is not reported as an unqualified success.
+    let receiver_confirmed = matches!(
+        tokio::time::timeout(Duration::from_secs(5), recv.read_to_end(64 * 1024)).await,
+        Ok(Ok(_))
+    );
 
     // End monitoring and take the final counters.
     monitor.stop();
     monitor.finished().await;
     let ever_relay = monitor.ever_relay_paths();
 
+    // Sampled from the latched direct-ready transition, not from elapsed()
+    // at outcome construction (a 10 s stream would otherwise report ~10 s
+    // regardless of when the direct path became ready).
+    let time_to_direct_ms = lock_gate(&gate)
+        .direct_ready_at_unix_ms()
+        .map(|t| t.saturating_sub(started_unix_ms));
     let outcome = SessionOutcome {
         role: MediaRole::Sender,
         direct_connection_success: stats.frames > 0,
-        time_to_direct_ms: stats
-            .first_frame_unix_ms
-            .map(|_| started.elapsed().as_millis() as u64),
-        relay_media_bytes: 0,
+        time_to_direct_ms,
+        relay_media_bytes: None,
         ever_relay_paths: ever_relay,
+        receiver_confirmed,
         stream: stats,
     };
     Ok((outcome, gate))
