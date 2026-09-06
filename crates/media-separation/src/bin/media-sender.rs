@@ -50,6 +50,7 @@ fn main() -> Result<()> {
     let mut result = new_result(
         format!("media-send-{}", run_suffix()),
         "direct-media",
+        "sender",
         &args.network_profile,
     );
     match outcome {

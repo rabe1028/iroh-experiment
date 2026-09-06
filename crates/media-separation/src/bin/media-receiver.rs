@@ -54,6 +54,7 @@ fn main() -> Result<()> {
     let mut result = new_result(
         format!("media-recv-{}", run_suffix()),
         "direct-media",
+        "receiver",
         &args.network_profile,
     );
     match outcome {
