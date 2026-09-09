@@ -97,10 +97,12 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     let conn = match endpoint.connect(target, BASELINE_ALPN).await {
         Ok(conn) => conn,
         Err(e) => {
-            // A connect failure happens before any direct path can exist, so
-            // a fresh result (direct_connection_success = false) is correct.
+            // A connect failure happens before any direct path can exist; the
+            // attempt was made, so the v2 result records Some(false) rather
+            // than the unattempted null of a setup error.
             endpoint.close().await;
             let mut r = new_result(run_id, "baseline", "dialer", &args.network_profile);
+            r.direct_connection_success = Some(false);
             r.failure_reason = Some(format!("connect failed: {e:#}"));
             return Ok(r);
         }
@@ -211,7 +213,8 @@ async fn run(args: &Args) -> Result<ExperimentResult> {
     let mut result = new_result(run_id, "baseline", "dialer", &args.network_profile);
     // A direct path may be established and later lost before sampling;
     // success means a direct path was observed at any point in the run.
-    result.direct_connection_success = first_direct.is_some() || selected_is_relay == Some(false);
+    result.direct_connection_success =
+        Some(first_direct.is_some() || selected_is_relay == Some(false));
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = selected_is_relay.map(|is_relay| {
         if is_relay {

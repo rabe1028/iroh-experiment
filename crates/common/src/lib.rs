@@ -50,8 +50,16 @@ pub struct ExperimentResult {
     pub observed_ip_equal: Option<bool>,
     pub observed_port_equal: Option<bool>,
     pub probe_latency_ms: Option<u64>,
+    /// Whether both ends of this observation used the same kind of socket
+    /// (false for standalone probes: NATs with per-destination mappings may
+    /// show a different mapping than an iroh connection would get). Null
+    /// when the run does not measure it.
+    pub same_socket_as_iroh: Option<bool>,
     // --- direct connection ---
-    pub direct_connection_success: bool,
+    /// Whether an iroh direct connection was established. Null for methods
+    /// that do not attempt one (e.g. external-address probes), so an
+    /// unattempted check is never mistaken for a measured failure.
+    pub direct_connection_success: Option<bool>,
     pub time_to_direct_ms: Option<u64>,
     pub selected_path: Option<SelectedPath>,
     /// RTT of the selected path at the end of the run (plan section 10.2
@@ -78,7 +86,8 @@ pub fn new_result(
     network_profile: &str,
 ) -> ExperimentResult {
     ExperimentResult {
-        schema_version: 1,
+        // v2: direct_connection_success became nullable (unattempted vs failed).
+        schema_version: 2,
         run_id: run_id.into(),
         endpoint_role: endpoint_role.to_string(),
         timestamp: SystemTime::now(),
@@ -90,7 +99,8 @@ pub fn new_result(
         observed_ip_equal: None,
         observed_port_equal: None,
         probe_latency_ms: None,
-        direct_connection_success: false,
+        same_socket_as_iroh: None,
+        direct_connection_success: None,
         time_to_direct_ms: None,
         selected_path: None,
         direct_path_rtt_ms: None,
@@ -101,6 +111,60 @@ pub fn new_result(
         payload_bytes: 0,
         media_throughput_mbps: None,
         failure_reason: None,
+    }
+}
+
+/// A run failure together with the direct-connection outcome observed when
+/// it happened. A setup error before any attempt stays unattempted (`None`),
+/// a failed attempt is a measured failure (`Some(false)`), and an error after
+/// the connection was established (e.g. during the payload stream) must keep
+/// the measured success (`Some(true)`) instead of erasing it.
+#[derive(Debug)]
+pub struct RunFailure {
+    /// Direct-connection outcome at failure time.
+    pub direct_connection_success: Option<bool>,
+    /// The underlying error.
+    pub err: anyhow::Error,
+}
+
+impl RunFailure {
+    /// The direct attempt was made but did not establish a connection.
+    pub fn failed_direct(err: anyhow::Error) -> Self {
+        Self {
+            direct_connection_success: Some(false),
+            err,
+        }
+    }
+
+    /// The direct connection was established; the failure came later.
+    pub fn direct_established(err: anyhow::Error) -> Self {
+        Self {
+            direct_connection_success: Some(true),
+            err,
+        }
+    }
+}
+
+impl From<anyhow::Error> for RunFailure {
+    fn from(err: anyhow::Error) -> Self {
+        // Setup errors happen before any attempt; wrap attempt-phase errors
+        // explicitly via `failed_direct` / `direct_established`.
+        Self {
+            direct_connection_success: None,
+            err,
+        }
+    }
+}
+
+impl std::fmt::Display for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.err, f)
+    }
+}
+
+impl std::error::Error for RunFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.err.as_ref())
     }
 }
 

@@ -103,13 +103,30 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
     // path already selected by then stays null (the paired dialer row, same
     // run_id, carries that transition).
     let t_conn = Instant::now();
-    let conn = endpoint
+    let conn = match endpoint
         .accept()
         .await
         .context("endpoint closed before incoming connection")?
         .accept()?
         .await
-        .context("accept failed")?;
+    {
+        Ok(conn) => conn,
+        Err(e) => {
+            // The peer attempted the dial and this side failed the accept, so
+            // the v2 result records the failed attempt as Some(false)
+            // rather than the unattempted null of a setup error.
+            let mut r = common::new_result(
+                format!("baseline-accept-{}", run_suffix()),
+                "baseline",
+                "acceptor",
+                network_profile,
+            );
+            r.direct_connection_success = Some(false);
+            r.failure_reason = Some(format!("accept failed: {e:#}"));
+            endpoint.close().await;
+            return Ok(r);
+        }
+    };
 
     println!("CONNECTED_AT_MS={}", t_conn.elapsed().as_millis());
     let t_start = Instant::now();
@@ -285,7 +302,8 @@ async fn run(network_profile: &str) -> Result<ExperimentResult> {
         "acceptor",
         network_profile,
     );
-    result.direct_connection_success = direct_ever || first_direct.is_some() || !selected_is_relay;
+    result.direct_connection_success =
+        Some(direct_ever || first_direct.is_some() || !selected_is_relay);
     result.time_to_direct_ms = first_direct.map(|d| d.as_millis() as u64);
     result.selected_path = Some(if selected_is_relay {
         SelectedPath::Relay

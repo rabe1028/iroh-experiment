@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     );
     match outcome {
         Ok((outcome, gate_state)) => {
-            result.direct_connection_success = outcome.direct_connection_success;
+            result.direct_connection_success = Some(outcome.direct_connection_success);
             result.time_to_direct_ms = outcome.time_to_direct_ms;
             // A successful run streamed only under a direct-selected gate.
             if outcome.direct_connection_success {

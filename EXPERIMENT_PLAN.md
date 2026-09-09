@@ -979,7 +979,7 @@ Fly egress bytes
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "run_id": "synthetic-n2-stun-0001",
   "endpoint_role": "dialer",
   "timestamp": "2026-08-23T00:00:00Z",
