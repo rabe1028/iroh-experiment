@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["crates/common", "crates/baseline"]
+members = [
+    "crates/common",
+    "crates/baseline",
+    "crates/tcp-tunnel",
+    "crates/cloudflare-stun",
+    "crates/media-separation",
+    "crates/cloudflare-h3-observer",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,3 +25,4 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
+tokio-stream = "0.1"
