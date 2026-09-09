@@ -5,6 +5,7 @@ members = [
     "crates/baseline",
     "crates/tcp-tunnel",
     "crates/cloudflare-stun",
+    "crates/media-separation",
 ]
 
 [workspace.package]
@@ -23,3 +24,4 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
+tokio-stream = "0.1"
