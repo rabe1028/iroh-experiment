@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/common", "crates/baseline"]
+members = ["crates/common", "crates/baseline", "crates/tcp-tunnel"]
 
 [workspace.package]
 version = "0.1.0"
