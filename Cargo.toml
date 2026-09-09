@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/common", "crates/baseline", "crates/tcp-tunnel"]
+members = [
+    "crates/common",
+    "crates/baseline",
+    "crates/tcp-tunnel",
+    "crates/cloudflare-stun",
+]
 
 [workspace.package]
 version = "0.1.0"
