@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/rabe1028/iroh-experiment/schemas/experiment-result.schema.json",
+  "title": "ExperimentResult",
+  "description": "One run of one experiment cell (plan section 11). Public IPs are never stored; only comparison results.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "endpoint_role",
+    "timestamp",
+    "iroh_version",
+    "method",
+    "network_profile",
+    "direct_connection_success",
+    "payload_bytes"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "run_id": { "type": "string" },
+    "endpoint_role": { "type": "string", "enum": ["acceptor", "dialer"] },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "git_revision": { "type": ["string", "null"] },
+    "iroh_version": { "type": "string" },
+    "method": { "type": "string" },
+    "network_profile": { "type": "string" },
+    "reference_method": { "type": ["string", "null"] },
+    "observed_ip_equal": { "type": ["boolean", "null"] },
+    "observed_port_equal": { "type": ["boolean", "null"] },
+    "probe_latency_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "direct_connection_success": { "type": "boolean" },
+    "time_to_direct_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "selected_path": {
+      "oneOf": [
+        { "enum": ["direct-ip", "relay", "mixed", "none"] },
+        { "type": "null" }
+      ]
+    },
+    "direct_path_rtt_ms": { "type": ["integer", "null"], "minimum": 0 },
+    "relay_control_tx_bytes": { "type": ["integer", "null"], "minimum": 0 },
+    "relay_control_rx_bytes": { "type": ["integer", "null"], "minimum": 0 },
+    "relay_media_tx_bytes": { "type": ["integer", "null"], "minimum": 0 },
+    "relay_media_rx_bytes": { "type": ["integer", "null"], "minimum": 0 },
+    "payload_bytes": { "type": "integer", "minimum": 0 },
+    "media_throughput_mbps": { "type": ["number", "null"], "minimum": 0 },
+    "failure_reason": { "type": ["string", "null"] }
+  }
+}
