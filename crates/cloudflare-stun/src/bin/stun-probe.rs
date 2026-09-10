@@ -90,6 +90,11 @@ fn bind_family(is_v4: bool) -> Result<tokio::net::UdpSocket> {
         UdpSocket::bind("[::]:0")
     }
     .context("binding probe socket")?;
+    // from_std requires nonblocking mode; a blocking fd panics when the
+    // runtime registers it (tokio/#7172).
+    std_sock
+        .set_nonblocking(true)
+        .context("setting probe socket nonblocking")?;
     tokio::net::UdpSocket::from_std(std_sock).context("async socket")
 }
 
