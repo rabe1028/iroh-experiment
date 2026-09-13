@@ -2,3 +2,10 @@
 results/raw/
 *.qlog
 .env
+# Secrets / local-only experiment assets (plan §18.1)
+.env.*
+*.tfvars
+*.tfstate*
+.playwright-mcp/
+# Result rows written outside results/raw/ (raw addresses may appear)
+results/*.jsonl
