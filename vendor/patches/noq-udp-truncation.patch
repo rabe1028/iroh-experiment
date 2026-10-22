@@ -1,0 +1,14 @@
+--- a/src/unix.rs
++++ b/src/unix.rs
+@@ -552,8 +552,10 @@
+     let mut name = MaybeUninit::<libc::sockaddr_storage>::uninit();
+     let mut ctrl = cmsg::Aligned(MaybeUninit::<[u8; cmsg::LEN]>::uninit());
+     let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
+-    prepare_recv(&mut bufs[0], &mut name, &mut ctrl, &mut hdr);
+     let n = loop {
++        // recvmsg mutates flags and buffer lengths. Clear MSG_TRUNC before
++        // retrying so a following EAGAIN cannot spin forever on stale flags.
++        prepare_recv(&mut bufs[0], &mut name, &mut ctrl, &mut hdr);
+         let n = unsafe { libc::recvmsg(io.as_raw_fd(), &mut hdr, 0) };
+ 
+         if hdr.msg_flags & libc::MSG_TRUNC != 0 {

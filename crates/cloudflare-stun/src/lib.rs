@@ -7,18 +7,14 @@
 //!
 //! ## Same-socket status
 //!
-//! The plan's key requirement is probing from *the same UDP socket iroh uses*
-//! (section 3.2), because different sockets can get different NAT mappings.
-//! iroh 1.0.3 does not expose a packet-level demux hook on its UDP transport
-//! (`EndpointHooks` are connection-level only; `unstable-custom-transports`
-//! adds transports on their own sockets), so this crate currently runs on a
-//! separate socket and every observation must carry that caveat
-//! (section 20.1: destination-dependent NAT).
+//! [`probe::discover`] and `stun-probe` use the actual UDP socket owned by
+//! the repository's pinned iroh 1.0.3 fork, and register the observation via
+//! `Endpoint::add_external_addr`. The IP transport alone receives packets;
+//! bounded STUN copies are matched by server and transaction id. QUIC
+//! packets stay on the normal receive path. `--standalone` is an explicit
+//! diagnostic mode and reports `same_socket_as_iroh: false`.
 //!
-//! The [`is_stun_packet`] classifier is provided so a future same-socket
-//! integration (section 20.3 escalation path: noq-layer hook) can route
-//! packets without changing this API: STUN messages start with their two top
-//! bits zeroed while QUIC packets always have bit 3 (0x40) set.
+//! See `vendor/README.md` for provenance and the opt-in transport patch.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,11 +76,11 @@ pub fn encode_binding_request(txn: &TransactionId) -> Vec<u8> {
     buf
 }
 
-/// Cheap packet classification shared by future same-socket demultiplexing:
+/// Cheap codec-level packet classification:
 /// true when the buffer plausibly starts a STUN message.
 ///
 /// STUN keeps its first two bits zero (RFC 8489 section 4); QUIC always sets
-/// bit 3 of its first byte (fixed bit, RFC 9000 section 17.2), so this never
+/// bit 6 (0x40) of its first byte (fixed bit, RFC 9000 section 17.2), so this never
 /// misclassifies a QUIC datagram as STUN.
 pub fn is_stun_packet(buf: &[u8]) -> bool {
     buf.len() >= HEADER_LEN && buf[0] & 0xc0 == 0

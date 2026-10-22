@@ -1,9 +1,37 @@
 # iroh Serverless NAT Traversal / Direct Media Path 実験計画書
 
-**Status:** Draft  
-**更新日:** 2026-08-23  
+**Status:** 実装・予備検証中（実ネットワーク比較は未実施）
+
+**更新日:** 2026-10-23
+
 **対象バージョン:** iroh 1.0.3を初期基準として固定  
 **想定成果物:** 公開Gitリポジトリ、再現可能な実験コード、匿名化した測定結果
+
+---
+
+## 0. 現在地（2026-10-23）
+
+本文のアーキテクチャと実験手順は目標仕様を含む。実装済み範囲は以下の通り。
+
+| 項目 | 実装状況 | 未完了 |
+|---|---|---|
+| Baseline | echo、path telemetry、共通JSONL schema v2 | 実ネットワーク測定 |
+| Raw TCP tunnel | service routing、EndpointIdごとの認可、HTTP/TLS/H2/WebSocket/SSE/gRPCのテスト | short-lived capability |
+| Cloudflare STUN | same-socket STUN tap、並列応答分離、iroh candidate登録、3478/53指定 | 実NAT比較・mapping refresh/失効 |
+| HTTP/3 observer | 同一noq Endpoint、WebPKI、header解析、live STUN比較、完全なaddressの登録 | Cloudflare zone設定・実測 |
+| Media separation | control/media Endpoint分離、media socketのSTUN、media relay無効化、candidate交換、fail-closed gate、合成stream、ローカルE2Eテスト | 実NAT、長時間、UDP blackhole試験、relay byte実測 |
+| Fly QAD / DO relay | 未実装 | infrastructure・protocol・測定 |
+| 実験基盤 / 最終report | 未実装 | NAT profiles、runner、匿名化・集計、公開測定結果 |
+
+- `cargo check --workspace --all-targets --locked --offline`: 成功（2026-10-23）。
+- `DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test --workspace --locked --offline`: 成功。Xcodeを選択した環境ではライセンス未同意エラーになるため、この検証では利用可能なCommand Line Toolsを選択した。
+- mediaはrelay transportを無効化し、テストではrelay path出現数を確認する。relay byte counterは公開APIから取得しておらず、結果は`null`。§13.4の実測基準を満たしたとは扱わない。
+- `stun-probe`と`h3-probe`は既定でirohの実socketを使用する。`h3-probe --stun-server`は同じlive Endpointで比較し、binding一致を確認する。`--standalone`と別プロセスの`--compare-stun-json`は比較条件が異なる。mappingの有効性は実peer接続で検証する。
+- Cloudflare STUN 3478へのsame-socket観測・candidate登録を実測確認。53は1秒・1回の条件では成功せず。生データはgitignore対象の`results/raw/`に保存し、公開比較実験の結果には数えない。
+- Cloudflareの[Response Header Transform対応field一覧](https://developers.cloudflare.com/rules/transform/response-header-modification/reference/fields-functions/)で、`cf.edge.client_port`、`cf.edge.client_tcp`、`cf.timings.client_quic_rtt_msec`を確認（2026-10-23）。以前の実装コメントにあった「port fieldが存在しない」という結論を撤回する。対象zoneでの利用可否とUDP mappingの意味は未測定。
+
+Cloudflareだけで始める予備実験は、STUN単体観測 → H3でのheader観測・IP比較 → port headerが取得できた場合の参考比較。
+Fly QADやDO relayはこの段階では不要。手順・期待値・制約は[infra/cloudflare/README.md](infra/cloudflare/README.md)を参照。
 
 ---
 
@@ -168,7 +196,7 @@ HTTP/3 204 No Content
 X-Observed-IP: 203.0.113.20
 X-Observed-Port: 53124
 X-Observed-Is-TCP: false
-X-Observed-QUIC-RTT-Ms: 18
+X-Observed-RTT-Ms: 18
 ```
 
 ただし、`cf.edge.client_port`がirohのNAT traversal用途で期待するUDP source portと完全に一致するかは、Cloudflareが保証している用途ではない。そのため、STUNおよび本物のQADと比較して実測する。
@@ -379,7 +407,7 @@ X-Observed-Port
 X-Observed-Is-TCP
   = to_string(cf.edge.client_tcp)
 
-X-Observed-QUIC-RTT-Ms
+X-Observed-RTT-Ms
   = to_string(cf.timings.client_quic_rtt_msec)
 
 X-Observed-HTTP-Version
@@ -391,6 +419,10 @@ Transform RulesはFree planを含む全planで利用でき、Free planでは10�
 静的asset requestは無料かつ無制限である。したがって、既存のCloudflare proxied domainがある場合、実験用reflectorのインフラ費用は原則$0になる。
 
 #### Client側
+
+現実装は`vendor/iroh`の`connect_quic` hookから同じnoq EndpointへH3接続する。
+`x-observed-ip`、`x-observed-port`、`x-observed-rtt-ms`を解析し、返されたTCP判定・HTTP versionも照合する。portが1〜65535かつ使用socketとIP familyが一致する完全な観測addressはirohへ登録する。
+QUIC/H3のみを使用し、TCP fallbackは行わない。
 
 通常のHTTP clientを使わず、irohと同じ`noq::Endpoint`からHTTP/3接続を作る。
 
@@ -648,6 +680,8 @@ D. suspended stateからUDP QADを送る
 
 ## E2. Same-socket Cloudflare STUN
 
+**現状:** 同一UDP socket上のSTUN tapとiroh candidate登録を実装済み。Cloudflare 3478の単発成功とローカルのIPv4/IPv6・並列probe・QUIC共存・誤応答拒否を確認。以下のFly QAD・実peerとの比較測定は未実施。
+
 ### 目的
 
 same-socket STUNから取得した外部アドレスでdirect接続できるか確認する。
@@ -695,6 +729,9 @@ actual direct peer source addr
 ---
 
 ## E3. Cloudflare HTTP/3疑似QAD
+
+**現状:** 同じnoq Endpoint・UDP socketからH3接続し、live STUN比較と完全なaddressのiroh登録まで実装済み。ローカルH3 serverで実際の送信元port一致とTLS検証を確認。対象Cloudflare zoneへの設定・実測は未実施。
+Worker単体例ではportは欠測となる。Transform Ruleでportを付与できれば、その値も解析・比較・登録できる。
 
 ### 目的
 
@@ -1287,6 +1324,20 @@ development cost
 
 ## 17. Pull Request単位の進め方
 
+元の計画単位と実際のGitHub PR番号は一致しない。BaselineはGitHub #1、TCP tunnel・STUN基盤・media分離・H3 observerはGitHub #6にまとめてmainへ取り込み済み。
+既存の実装に加え、この変更でsame-socket STUN/H3統合と回帰テストを追加した。
+
+| 計画単位 | 2026-10-23時点 |
+|---|---|
+| PR 1 Baseline | 実装取り込み済み |
+| PR 2 Raw TCP tunnel | 実装・互換性テスト取り込み済み |
+| PR 3 Fly QAD-only | 未着手 |
+| PR 4 Same-socket STUN | same-socket tap・candidate登録を追加。ローカルとCloudflare 3478で確認 |
+| PR 5 HTTP/3 observer | same-noq EndpointのH3とlive STUN比較を追加。zone実測は未完了 |
+| PR 6 Media separation | 実装・ローカルテスト取り込み済み。実NAT・長時間・UDP遮断は未検証 |
+| PR 7 Durable Object relay | 未着手 |
+| PR 8 Final report | 未着手 |
+
 ### PR 1: Baseline
 
 ```text
@@ -1463,7 +1514,9 @@ STUNおよびFly QADとの比較を必須にする。
 
 ### 20.3 same-socket実装
 
-irohの公開APIだけでは、同じUDP socketから任意のSTUN packetやHTTP/3 connectionを作ることが難しい可能性がある。
+upstream iroh 1.0.3の公開APIには必要なsocket tapがないため、固定snapshotを`vendor/iroh`に保存し、feature `unstable-raw-udp`でSTUN受信tapとH3 client hookを追加した。noqは1.1.1を固定し、H3 adapterも同版へ合わせる。由来・最小patchは[vendor/README.md](vendor/README.md)を参照。
+
+同一familyに複数socketがあるendpointは曖昧な経路選択を避けるためprobe APIで拒否する。network変更時の自動refresh・失効は未実装で、現在の実験はbindingが安定した条件で行う。
 
 次の順で対応する。
 

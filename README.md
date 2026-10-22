@@ -5,25 +5,57 @@ iroh Serverless NAT Traversal / Direct Media Path 実験のリポジトリ。
 
 ## 対象バージョン
 
-- iroh: **1.0.3** (`Cargo.toml` で pin)
+- iroh: **1.0.3**（same-socket拡張を含む`vendor/iroh`へ固定）
+- H3: noq **1.1.1** + ローカル`h3-noq` adapter。`noq-udp`にはtruncated UDP受信の再試行修正を適用。由来と変更点は[vendor/README.md](vendor/README.md)。
 
-## 構成 (PR 1: Baseline)
+## 現在の進捗（2026-10-23）
+
+STUN・H3のsame-socket統合まで実装済み。Cloudflare STUN 3478への単発観測を確認し、実NAT越えの比較測定はこれから。
+以下はコードの実装状況であり、実環境での合格を示すものではない。
+
+| 項目 | 状況 | 残作業・制約 |
+|---|---|---|
+| E0 Baseline | echo・path telemetry・JSONL出力を実装 | 実ネットワーク測定 |
+| Raw TCP tunnel | service routing・EndpointId認可・互換性テストを実装 | short-lived capabilityは未実装 |
+| Cloudflare STUN | 同一UDP socketで観測・応答分離・external address登録を実装 | 3478の実測成功。53は今回の短い試行で未成功。実NAT比較は未実施 |
+| HTTP/3 observer | 同一noq Endpoint・socketでH3観測とSTUN比較。完全なaddressはirohへ登録 | Cloudflare zone設定と実測は未確認 |
+| Media separation | Endpoint分離・relay無効化・停止gate・合成stream・media socket上のSTUNを実装 | 実NAT・長時間・UDP遮断試験。relay byte数は未計測（null） |
+| Fly.io QAD-only | 未実装 | デプロイ定義・基準測定 |
+| Durable Object relay | 未実装 | relay protocol・Ping間隔実験 |
+| 実験基盤・最終report | 未実装 | NAT環境・matrix runner・匿名化・集計。追跡済み測定結果なし |
+
+2026-10-23にCommand Line Toolsを選択してworkspaceテストを実行し、成功。
+STUN/H3/irohの実際の送信元port一致、IPv4/IPv6、並列probe、送信元・transaction検証、終了時のキャンセル、candidate登録、TCP互換性、mediaの正常転送・接続切断を確認した。
+このMacでは`DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test --workspace --locked --offline`を使用。
+GitHub ActionsでもLinux・macOSでformat、Clippy、既定featureのビルド、workspaceテストを実行する。
+
+Cloudflareの公式field一覧には`cf.edge.client_port`とQUIC RTTが掲載されている。
+以前の「portは取得できない」という調査記述は訂正した。fieldの利用可否・値の意味は対象zoneで実測する。
+設定と出典は[Cloudflare実験手順](infra/cloudflare/README.md)を参照。
+
+## 構成
 
 | Path | 内容 |
 |---|---|
 | `crates/common/` | 結果スキーマ (`ExperimentResult`, §11)、ALPN定数 |
 | `crates/baseline/` | E0 Baseline echo実験 (`baseline-acceptor` / `baseline-dialer`) |
+| `crates/tcp-tunnel/` | raw TCP tunnel (`gateway` / `client`) |
+| `crates/cloudflare-stun/` | STUN codec・単体probe (`stun-probe`) |
+| `crates/cloudflare-h3-observer/` | same-socket HTTP/3観測・STUN比較 (`h3-probe`) |
+| `crates/media-separation/` | direct-only合成media (`media-receiver` / `media-sender`) |
+| `infra/cloudflare/` | Cloudflare設定・最小実験手順 |
 | `schemas/experiment-result.schema.json` | 結果JSONLのスキーマ |
-| `results/raw.example/` | 結果JSONLの保存先 |
+| `results/raw/` | 非公開の実測データ保存先（gitignore対象） |
+| `results/raw.example/` | 公開用の匿名化サンプル保存先（現時点では空） |
 
 ## 使い方 (E0 Baseline)
 
 ```sh
 cargo run --release --bin baseline-acceptor -- \
-    --results results/raw.example/e0.jsonl --network-profile L0
+    --results results/raw/e0.jsonl --network-profile L0
 # 別ターミナル
 cargo run --release --bin baseline-dialer <ENDPOINT_ID> \
-    --results results/raw.example/e0.jsonl --network-profile L0
+    --results results/raw/e0.jsonl --network-profile L0
 ```
 
 acceptorが `ENDPOINT_ID=...` を出力するのでdialerに渡す。
@@ -35,13 +67,23 @@ dialerが生成したrun idがストリーム先頭に送られ、両プロセ�
 
 公開IPアドレスは結果に保存しない (§18)。
 
-## ロードマップ (§17)
+## Cloudflareで今できる最小実験
 
-1. ~~PR 1: Baseline (echo protocol, path telemetry, result schema)~~
-2. PR 2: Raw TCP tunnel
-3. PR 3: Fly.io QAD-only reference
-4. PR 4: Same-socket Cloudflare STUN
-5. PR 5: HTTP/3 observer
-6. PR 6: Media separation
-7. PR 7: Durable Object relay
-8. PR 8: Final report
+1. `stun-probe`は既定でirohの実socketを使用する。同じプロセスで指定した3478/53の観測は同じbindingを使う。
+2. WorkerまたはTransform Ruleを設定し、`h3-probe --stun-server stun.cloudflare.com:3478`で同じsocketからSTUNとH3を比較する。
+3. `x-observed-port`が返る場合はportも比較し、完全な観測addressをirohへ登録する。
+4. media実験のsender/receiverにも`--stun-server`を指定でき、relayを無効にしたmedia socket自体で観測する。
+
+手順は[infra/cloudflare/README.md](infra/cloudflare/README.md)に記載。
+`--compare-stun-json`で別プロセスのfileを読む場合は別socket比較となる。same-socket比較には`--stun-server`を使う。
+同じsocketで一致しても、相手peerに対するmappingの有効性やNAT越え成功は別途確認する。
+direct mediaのローカル確認は別途可能だが、Cloudflareだけでのcontrol relayはまだない。
+
+## 次の作業
+
+1. CloudflareのH3観測用zoneを設定し、same-socketのSTUN/H3比較を実測する。
+2. Fly QAD基準・NAT試験環境を整備し、direct成功率とmedia障害時の挙動を測る。
+3. mappingのrefresh・失効、network epoch追従を整備する。
+4. Durable Object relay、集計・最終reportへ進む。
+
+元のPR単位の計画と各項目の進捗は[実験計画 §17](EXPERIMENT_PLAN.md#17-pull-request単位の進め方)を参照。
