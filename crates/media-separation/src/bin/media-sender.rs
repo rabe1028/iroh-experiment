@@ -20,6 +20,9 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 struct Args {
+    /// Discover on this actual media socket; repeated servers are fallbacks.
+    #[arg(long = "stun-server")]
+    stun_servers: Vec<String>,
     /// Receiver's control EndpointId (hex).
     control_id: String,
     /// File to append a JSON result line to (JSONL).
@@ -95,6 +98,8 @@ fn run_suffix() -> String {
 
 async fn run(args: &Args) -> Result<(media_separation::SessionOutcome, GateState)> {
     let pair = EndpointPair::bind(iroh::endpoint::presets::N0).await?;
+    pair.discover_media(&args.stun_servers, Duration::from_secs(30), 0)
+        .await?;
 
     // --- control plane: fetch the receiver's media candidates ---
     let target: EndpointId = args.control_id.parse().context("invalid EndpointId")?;

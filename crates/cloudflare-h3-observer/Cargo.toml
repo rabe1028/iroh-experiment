@@ -7,12 +7,15 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bytes = "1"
 clap.workspace = true
 common = { path = "../common" }
 h3 = "0.0.8"
-h3-quinn = "0.0.10"
+h3-quinn = { package = "h3-noq", path = "../../vendor/h3-noq" }
+cloudflare-stun = { path = "../cloudflare-stun" }
+iroh = { workspace = true, features = ["unstable-raw-udp"] }
 http = "1"
-quinn = "0.11"
+quinn = { package = "noq", version = "=1.1.1", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -22,6 +25,5 @@ tracing-subscriber.workspace = true
 webpki-roots = "1"
 
 [dev-dependencies]
-bytes = "1"
 rcgen = "0.13"
 rand.workspace = true

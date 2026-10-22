@@ -34,10 +34,13 @@ struct Args {
     /// interface addresses (repeatable). The local candidates alone are
     /// private/interface addresses, so a sender outside the receiver's LAN
     /// cannot dial them; supply e.g. the media endpoint's port behind a NAT
-    /// static mapping, or the address a STUN probe observed for this host
-    /// (use the media endpoint's port if the mapping preserves it).
+    /// static mapping. Use --stun-server to observe this exact media socket;
+    /// a standalone probe's mapping is not a media candidate.
     #[arg(long = "advertise-addr")]
     advertise_addrs: Vec<String>,
+    /// Observe the actual media socket via STUN; repeated servers are fallbacks.
+    #[arg(long = "stun-server")]
+    stun_servers: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -120,15 +123,23 @@ async fn run(
     // Snapshot the media addresses only now, right before advertising: an
     // interface change while waiting for the dialer must not publish stale
     // pre-wait addresses stamped as freshly observed for the whole TTL.
+    const EPOCH: u64 = 0;
+    let stun_candidates = pair
+        .discover_media(
+            &args.stun_servers,
+            Duration::from_millis(args.candidate_ttl_ms),
+            EPOCH,
+        )
+        .await?;
     let addrs = pair.media_direct_addrs();
     for addr in &addrs {
         println!("MEDIA_ADDR={addr}");
     }
     anyhow::ensure!(!addrs.is_empty(), "media endpoint has no direct addresses");
 
-    const EPOCH: u64 = 0;
     let mut cands: Vec<DirectCandidate> = addrs
         .iter()
+        .filter(|addr| !stun_candidates.iter().any(|c| c.addr == **addr))
         .map(|addr| {
             DirectCandidate::local(
                 pair.media.id(),
@@ -138,6 +149,7 @@ async fn run(
             )
         })
         .collect();
+    cands.extend(stun_candidates);
     for raw in &args.advertise_addrs {
         let addr: std::net::SocketAddr = raw
             .parse()

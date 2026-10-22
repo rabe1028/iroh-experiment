@@ -1,0 +1,75 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -12,7 +12,7 @@
+ [package]
+ edition = "2021"
+ rust-version = "1.70"
+-name = "h3-quinn"
++name = "h3-noq"
+ version = "0.0.10"
+ authors = ["Jean-Christophe BEGUE <jc.begue@pm.me>"]
+ build = false
+@@ -41,7 +41,7 @@
+ tracing = ["dep:tracing"]
+ 
+ [lib]
+-name = "h3_quinn"
++name = "h3_noq"
+ path = "src/lib.rs"
+ 
+ [dependencies.bytes]
+@@ -58,7 +58,8 @@
+ optional = true
+ 
+ [dependencies.quinn]
+-version = "0.11.7"
++package = "noq"
++version = "=1.1.1"
+ features = ["futures-io"]
+ default-features = false
+ 
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -347,13 +347,8 @@
+     read_chunk_fut: ReadChunkFuture,
+ }
+ 
+-type ReadChunkFuture = ReusableBoxFuture<
+-    'static,
+-    (
+-        quinn::RecvStream,
+-        Result<Option<quinn::Chunk>, quinn::ReadError>,
+-    ),
+->;
++type ReadChunkFuture =
++    ReusableBoxFuture<'static, (quinn::RecvStream, Result<Option<Bytes>, quinn::ReadError>)>;
+ 
+ impl RecvStream {
+     fn new(stream: quinn::RecvStream) -> Self {
+@@ -375,16 +370,14 @@
+     ) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
+         if let Some(mut stream) = self.stream.take() {
+             self.read_chunk_fut.set(async move {
+-                let chunk = stream.read_chunk(usize::MAX, true).await;
++                let chunk = stream.read_chunk(usize::MAX).await;
+                 (stream, chunk)
+             })
+         };
+ 
+         let (stream, chunk) = ready!(self.read_chunk_fut.poll(cx));
+         self.stream = Some(stream);
+-        Poll::Ready(Ok(chunk
+-            .map_err(|e| convert_read_error_to_stream_error(e))?
+-            .map(|c| c.bytes)))
++        Poll::Ready(Ok(chunk.map_err(convert_read_error_to_stream_error)?))
+     }
+ 
+     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
+@@ -415,7 +408,6 @@
+             }
+         }
+         error @ ReadError::ClosedStream => StreamErrorIncoming::Unknown(Box::new(error)),
+-        ReadError::IllegalOrderedRead => panic!("h3-quinn only performs ordered reads"),
+         error @ ReadError::ZeroRttRejected => StreamErrorIncoming::Unknown(Box::new(error)),
+     }
+ }

@@ -2,25 +2,24 @@
 //!
 //! Dials a Cloudflare-proxied host over HTTP/3 (`ALPN=h3`, QUIC) and reads
 //! the observation headers the zone is configured to emit (see
-//! `infra/cloudflare/`): the edge-visible client IP and, if available, RTT.
+//! `infra/cloudflare/`): the edge-visible client IP and optional port/RTT.
 //!
-//! ## Known platform limit (verified 2026-08 against current CF docs)
+//! ## Observation configuration (rechecked 2026-10-23)
 //!
-//! **Cloudflare does not expose the client's source port anywhere**: neither
-//! Transform Rules (no rules-language field for it; `cf.edge.server_port` is
-//! the *edge's* port) nor Workers `request.cf` (which has `clientQuicRtt`,
-//! `httpProtocol`, `colo`, ... but no client port). So H3 pseudo-QAD can
-//! confirm **IP equality** only; the port component of plan E3's comparison
-//! categories lands in [`Comparison::SameIpPortMissing`] at best. The
-//! experiment still distinguishes "same IP" from "different IP", which is
-//! the part that matters for candidate usefulness.
+//! Cloudflare's response-header Transform Rules list `cf.edge.client_port`
+//! and `cf.timings.client_quic_rtt_msec`. A rule can be configured to emit
+//! the port header this client already parses; availability and mapping
+//! semantics still require measurement on the target zone. The Worker-only
+//! example omits the port, yielding [`Comparison::SameIpPortMissing`].
+//! See `infra/cloudflare/README.md` for official sources and setup.
 //!
-//! ## Same-socket caveat
+//! ## Same-socket integration
 //!
-//! As established in PR 4, iroh 1.0.3's public API cannot share its UDP
-//! socket, so this observer runs on its own socket. All outputs carry
-//! `same_socket_as_iroh: false`; NATs with per-destination mappings may show
-//! a different mapping than iroh's (plan §20.1).
+//! `observe_on_endpoint` opens H3 on an existing iroh noq endpoint. It uses
+//! the same UDP sockets and CID demultiplexer; complete observations are
+//! registered as external addresses. The CLI uses this path by default.
+//! The legacy `observe` helper still uses its own socket and reports false.
+//! Mapping usefulness still depends on the NAT and must be measured.
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -29,6 +28,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use bytes::Buf;
 use http::{HeaderName, HeaderValue};
 use quinn::crypto::rustls::QuicClientConfig;
 use serde::{Deserialize, Serialize};
@@ -47,17 +47,23 @@ pub struct H3Observation {
     pub server_host: String,
     /// Client IP as seen by the edge.
     pub observed_ip: Option<IpAddr>,
-    /// Always `None` with current Cloudflare (platform does not expose it).
+    /// Optional source port emitted by the configured Transform Rule.
     pub observed_port: Option<u16>,
-    /// Smoothed QUIC RTT reported by `request.cf.client_quic_rtt`, ms.
+    /// Smoothed QUIC RTT from a Transform Rule or `request.cf.clientQuicRtt`, ms.
     pub rtt_ms: Option<f64>,
     /// IATA code of the responding data center.
     pub colo: Option<String>,
     /// Total probe wall time.
     #[serde(with = "millis")]
     pub duration: Duration,
-    /// Always false until same-socket becomes possible (PR 4 finding).
+    /// Whether this observation used an existing iroh transport socket.
     pub same_socket_as_iroh: bool,
+    /// Actual iroh UDP binding, present for a shared-endpoint observation.
+    #[serde(default)]
+    pub local_addr: Option<SocketAddr>,
+    /// True when a complete same-socket observation was registered with iroh.
+    #[serde(default)]
+    pub candidate_registered: bool,
 }
 
 mod millis {
@@ -77,15 +83,15 @@ mod millis {
 
 /// Plan E3 comparison categories between two discovery methods.
 ///
-/// Note there is no `SameIpSamePort` variant reachable through H3 today:
-/// Cloudflare never reports the client port (see crate docs), so the best
-/// possible outcome is [`Comparison::SameIpPortMissing`].
+/// Port comparison requires an `x-observed-port` header. Use live STUN and
+/// H3 observations from the same endpoint to compare mappings. Even then,
+/// candidate usefulness requires a real peer connectivity measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum Comparison {
     /// Same IP, and both methods agree on the port.
     SameIpSamePort,
-    /// Same IP but ports differ (per-destination NAT mapping).
+    /// Same IP but ports differ (socket or NAT mapping differences).
     SameIpDifferentPort,
     /// Same IP; one method could not report a port.
     SameIpPortMissing,
@@ -129,6 +135,110 @@ pub async fn observe(
         })
 }
 
+/// Observe HTTP/3 using the same noq endpoint, UDP sockets, and CID demux
+/// as an existing iroh endpoint. WebPKI certificate validation stays enabled.
+/// Only families with exactly one IP socket are accepted, making socket
+/// identity unambiguous for comparisons against STUN on that endpoint.
+pub async fn observe_on_endpoint(
+    endpoint: &iroh::Endpoint,
+    host: &str,
+    path: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<H3Observation> {
+    let started = std::time::Instant::now();
+    tokio::time::timeout(timeout, async {
+        let addresses = tokio::net::lookup_host((host, port))
+            .await
+            .context("DNS resolution")?;
+        let mut last_error = anyhow!("no usable DNS addresses for the endpoint's IP sockets");
+        for addr in addresses {
+            match observe_on_endpoint_with_config(
+                endpoint,
+                addr,
+                host,
+                path,
+                timeout,
+                client_config(host)?,
+            )
+            .await
+            {
+                Ok(mut observation) => {
+                    observation.duration = started.elapsed();
+                    return Ok(observation);
+                }
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error)
+    })
+    .await
+    .map_err(|_| anyhow!("probe timed out after {timeout:?}"))?
+}
+
+/// Same-endpoint probe with an explicit address and TLS configuration.
+///
+/// Useful for deterministic tests with a private CA. Production callers
+/// should normally use `observe_on_endpoint`, which uses WebPKI roots.
+pub async fn observe_on_endpoint_with_config(
+    endpoint: &iroh::Endpoint,
+    addr: SocketAddr,
+    host: &str,
+    path: &str,
+    timeout: Duration,
+    config: quinn::ClientConfig,
+) -> Result<H3Observation> {
+    let started = std::time::Instant::now();
+    tokio::time::timeout(timeout, async {
+        let addr = SocketAddr::new(addr.ip().to_canonical(), addr.port());
+        let bindings: Vec<_> = endpoint
+            .stun_sockets()
+            .iter()
+            .filter_map(|socket| socket.local_addr().ok())
+            .filter(|local| local.is_ipv4() == addr.is_ipv4())
+            .collect();
+        anyhow::ensure!(
+            bindings.len() == 1,
+            "need exactly one matching iroh IP socket"
+        );
+        let conn = endpoint
+            .connect_quic(config, addr, host)
+            .context("start shared-endpoint H3 connection")?
+            .await
+            .context("H3 QUIC handshake")?;
+        let mut observation = observe_connection(conn, host, path, addr.port()).await?;
+        let current: Vec<_> = endpoint
+            .stun_sockets()
+            .iter()
+            .filter_map(|socket| socket.local_addr().ok())
+            .filter(|local| local.is_ipv4() == addr.is_ipv4())
+            .collect();
+        anyhow::ensure!(
+            current == bindings && !endpoint.is_closed(),
+            "iroh socket changed during H3 probe"
+        );
+        let observed_ip = observation.observed_ip.context("missing observed IP")?;
+        anyhow::ensure!(
+            observed_ip.is_ipv4() == bindings[0].is_ipv4()
+                && !observed_ip.is_unspecified()
+                && !observed_ip.is_multicast(),
+            "observed IP is not usable on the probed socket family"
+        );
+        if let Some(port) = observation.observed_port {
+            endpoint
+                .add_external_addr(SocketAddr::new(observed_ip, port))
+                .await;
+            observation.candidate_registered = true;
+        }
+        observation.same_socket_as_iroh = true;
+        observation.local_addr = Some(bindings[0]);
+        observation.duration = started.elapsed();
+        Ok(observation)
+    })
+    .await
+    .map_err(|_| anyhow!("probe timed out after {timeout:?}"))?
+}
+
 /// Wrapper so the spawned H3 driver task is aborted on every exit path,
 /// including `?`-propagated errors and the outer probe timeout.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -147,7 +257,7 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
         .next()
         .context("no addresses resolved")?;
 
-    let mut endpoint =
+    let endpoint =
         quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).context("bind client endpoint")?;
     endpoint.set_default_client_config(client_config(host)?);
 
@@ -157,6 +267,23 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
         .await
         .context("QUIC handshake (HTTP/3 fallback or UDP block shows up here)")?;
 
+    observe_connection(conn, host, path, port).await
+}
+
+struct CloseConnection(quinn::Connection);
+impl Drop for CloseConnection {
+    fn drop(&mut self) {
+        self.0.close(0u32.into(), b"observation complete");
+    }
+}
+
+async fn observe_connection(
+    conn: quinn::Connection,
+    host: &str,
+    path: &str,
+    port: u16,
+) -> Result<H3Observation> {
+    let _connection = CloseConnection(conn.clone());
     let (mut driver, mut send_request) = h3::client::new(h3_quinn::Connection::new(conn))
         .await
         .context("h3 init failed")?;
@@ -215,6 +342,15 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
     // required observation did not happen, so this must fail the probe
     // instead of silently reporting None (which STUN comparison treats as
     // optional and would record as a successful run).
+    if let Some(is_tcp) = header("x-observed-is-tcp") {
+        anyhow::ensure!(is_tcp == "false", "edge reports a TCP observation");
+    }
+    if let Some(version) = header("x-observed-http-version") {
+        anyhow::ensure!(
+            matches!(version.as_str(), "HTTP/3" | "HTTP/3.0"),
+            "edge reports a non-H3 observation"
+        );
+    }
     let raw_ip = header(HDR_OBSERVED_IP);
     let observed_ip: Option<IpAddr> = Some(
         raw_ip
@@ -227,10 +363,13 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
     // probe instead of silently degrading to SameIpPortMissing.
     let observed_port = match header(HDR_OBSERVED_PORT) {
         Some(v) if v.is_empty() => None,
-        Some(v) => Some(
-            v.parse()
-                .context("x-observed-port is not a valid u16 port")?,
-        ),
+        Some(v) => {
+            let port: u16 = v
+                .parse()
+                .context("x-observed-port is not a valid u16 port")?;
+            anyhow::ensure!(port != 0, "x-observed-port must be nonzero");
+            Some(port)
+        }
         None => None,
     };
     // Same contract as x-observed-port: empty means "not reported"; a
@@ -252,24 +391,43 @@ async fn observe_inner(host: &str, path: &str, port: u16) -> Result<H3Observatio
     };
     let colo = header(HDR_COLLO);
 
-    // Consume the body so the connection can close cleanly.
-    loop {
-        match stream.recv_data().await {
-            Ok(Some(chunk)) => drop(chunk),
-            Ok(None) => break,
-            Err(_) => break,
-        }
+    // h3 exposes the body/trailers separately and does not enforce the
+    // advertised Content-Length here. A truncated measurement must never
+    // register its candidate, even if valid observation headers arrived.
+    let expected_len = response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .map(|value| -> Result<u64> { Ok(value.to_str()?.parse()?) })
+        .transpose()
+        .context("invalid H3 Content-Length")?;
+    let mut received_len = 0u64;
+    while let Some(chunk) = stream.recv_data().await.context("read H3 response body")? {
+        received_len = received_len
+            .checked_add(chunk.remaining() as u64)
+            .context("H3 response body length overflow")?;
+    }
+    stream
+        .recv_trailers()
+        .await
+        .context("read H3 response trailers")?;
+    if let Some(expected_len) = expected_len {
+        anyhow::ensure!(
+            received_len == expected_len,
+            "H3 response body length mismatch"
+        );
     }
 
     Ok(H3Observation {
         server_host: host.to_string(),
         observed_ip,
-        // Platform limit: Cloudflare never exposes the client source port.
+        // Optional: depends on the zone's observation header configuration.
         observed_port,
         rtt_ms,
         colo,
         duration: Duration::ZERO,
         same_socket_as_iroh: false,
+        local_addr: None,
+        candidate_registered: false,
     })
 }
 

@@ -4,7 +4,7 @@
 //! Prints the JSON observation; optionally compares against a STUN probe
 //! result file and prints the plan E3 comparison verdict.
 
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -33,10 +33,17 @@ struct Args {
     /// Optional STUN observation JSON (from stun-probe) to compare against.
     #[arg(long)]
     compare_stun_json: Option<String>,
+    /// Probe STUN on this same live iroh socket; repeated servers are fallbacks.
+    #[arg(long = "stun-server", conflicts_with = "compare_stun_json")]
+    stun_servers: Vec<String>,
+    /// Bind one IP socket for both STUN and H3 (IPv4 by default).
+    #[arg(long, default_value = "0.0.0.0:0")]
+    bind: SocketAddr,
 }
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
@@ -58,10 +65,10 @@ fn main() -> Result<()> {
             // when a comparison actually happened, so an un-referenced run
             // does not claim one (plan E3).
             result.reference_method = comparison.map(|_| "cloudflare-stun".to_string());
-            // Preserve the dedicated-socket caveat in the stored result:
-            // this probe never shares iroh's socket, so per-destination NAT
-            // mappings may differ from what a real connection would see.
-            result.same_socket_as_iroh = Some(obs.same_socket_as_iroh);
+            // File comparisons cannot prove that the reference used this
+            // live socket. Only --stun-server checks the shared binding.
+            result.same_socket_as_iroh =
+                Some(obs.same_socket_as_iroh && args.compare_stun_json.is_none());
             result.observed_ip_equal = comparison.map(|c| {
                 matches!(
                     c,
@@ -99,7 +106,37 @@ fn main() -> Result<()> {
 }
 
 async fn run(args: &Args) -> Result<(H3Observation, Option<Comparison>)> {
-    let obs = cloudflare_h3_observer::observe(
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr(args.bind)?
+        .bind()
+        .await?;
+    let outcome = run_on_endpoint(args, &endpoint).await;
+    endpoint.close().await;
+    outcome
+}
+
+async fn run_on_endpoint(
+    args: &Args,
+    endpoint: &iroh::Endpoint,
+) -> Result<(H3Observation, Option<Comparison>)> {
+    let mut live_stun = None;
+    let mut last_error = None;
+    for server in &args.stun_servers {
+        match cloudflare_stun::probe::discover_server(endpoint, server, &Default::default()).await {
+            Ok(observation) => {
+                live_stun = Some(observation);
+                break;
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if !args.stun_servers.is_empty() && live_stun.is_none() {
+        return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no STUN observation")))
+            .context("same-socket STUN failed");
+    }
+    let obs = cloudflare_h3_observer::observe_on_endpoint(
+        endpoint,
         &args.host,
         &args.path,
         args.port,
@@ -109,6 +146,20 @@ async fn run(args: &Args) -> Result<(H3Observation, Option<Comparison>)> {
     .context("H3 observation failed")?;
 
     let mut comparison = None;
+    if let Some(stun) = live_stun {
+        anyhow::ensure!(
+            obs.local_addr == Some(stun.local_addr),
+            "STUN and H3 used different local sockets"
+        );
+        comparison = Some(cloudflare_h3_observer::compare(stun.observed_addr, &obs)?);
+        println!(
+            "STUN_OBSERVATION={}",
+            serde_json::json!({
+                "method": stun.method, "observed_addr": stun.observed_addr,
+                "local_addr": stun.local_addr, "same_socket_as_iroh": stun.same_socket_as_iroh,
+            })
+        );
+    }
     if let Some(stun_path) = &args.compare_stun_json {
         let stun: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(stun_path).context("read STUN json")?)

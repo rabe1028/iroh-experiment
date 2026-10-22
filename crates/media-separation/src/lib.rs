@@ -201,6 +201,44 @@ impl EndpointPair {
         Ok(Self { control, media })
     }
 
+    /// Discover on the actual relay-disabled media socket and register the
+    /// result with iroh. Servers are fallbacks; this never probes control's
+    /// socket or creates a separate UDP binding.
+    pub async fn discover_media(
+        &self,
+        servers: &[String],
+        ttl: Duration,
+        epoch: u64,
+    ) -> Result<Vec<DirectCandidate>> {
+        if servers.is_empty() {
+            return Ok(Vec::new());
+        }
+        anyhow::ensure!(!ttl.is_zero(), "STUN candidate TTL must be positive");
+        let mut last_error = anyhow_err!("no STUN server succeeded");
+        for server in servers {
+            match cloudflare_stun::probe::discover_server(&self.media, server, &Default::default())
+                .await
+            {
+                Ok(observation) => {
+                    let observed_at = observation
+                        .observed_at
+                        .duration_since(UNIX_EPOCH)?
+                        .as_millis() as u64;
+                    return Ok(vec![DirectCandidate {
+                        endpoint_id: self.media.id(),
+                        addr: observation.observed_addr,
+                        source: CandidateSource::CloudflareStun,
+                        observed_at_unix_ms: observed_at,
+                        expires_at_unix_ms: observed_at.saturating_add(ttl.as_millis() as u64),
+                        network_epoch: epoch,
+                    }]);
+                }
+                Err(error) => last_error = error,
+            }
+        }
+        Err(last_error).context("same-socket media STUN discovery")
+    }
+
     /// Direct addresses of the media endpoint (IP transports only).
     ///
     /// Panics if a non-IP transport shows up here, which would mean

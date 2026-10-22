@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/iroh", "vendor/h3-noq", "vendor/noq-udp"]
 members = [
     "crates/common",
     "crates/baseline",
@@ -26,3 +27,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 tokio-stream = "0.1"
+
+# Fixed iroh 1.0.3 with opt-in same-socket STUN and QUIC client hooks.
+[patch.crates-io]
+iroh = { path = "vendor/iroh" }
+noq-udp = { path = "vendor/noq-udp" }

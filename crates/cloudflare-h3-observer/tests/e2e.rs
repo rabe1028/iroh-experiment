@@ -53,9 +53,8 @@ async fn observes_headers_over_real_h3() {
                     continue;
                 };
                 if req.uri().path() == "/observe" {
-                    // Same headers infra/cloudflare/ configures the zone to
-                    // emit. Note there is deliberately no port header: the
-                    // platform cannot produce one.
+                    // Mimic the Worker-only example, which omits the port
+                    // header. A Transform Rule may add it in a real zone.
                     let response = http::Response::builder()
                         .status(200)
                         .header("x-observed-ip", "203.0.113.20")
@@ -90,7 +89,7 @@ async fn observes_headers_over_real_h3() {
     let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(client_tls).unwrap();
     let mut client_cfg = quinn::ClientConfig::new(Arc::new(quic_client));
     client_cfg.transport_config(Arc::new(quinn::TransportConfig::default()));
-    let mut client_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let client_endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
     client_endpoint.set_default_client_config(client_cfg);
 
     let conn = client_endpoint.connect(addr, host).unwrap().await.unwrap();
@@ -137,9 +136,11 @@ fn comparison_categories_match_plan_e3() {
         colo: None,
         duration: std::time::Duration::ZERO,
         same_socket_as_iroh: false,
+        local_addr: None,
+        candidate_registered: false,
     };
     let stun_same = SocketAddr::new(base.observed_ip.unwrap(), 40000);
-    // Port missing from H3 (platform limit): best case is port-missing.
+    // Worker-only observation: the port was not reported.
     assert_eq!(
         compare(stun_same, &base).unwrap(),
         Comparison::SameIpPortMissing
@@ -152,7 +153,7 @@ fn comparison_categories_match_plan_e3() {
     };
     assert_eq!(compare(stun_same, &other).unwrap(), Comparison::DifferentIp);
 
-    // If a future platform exposes the port, both agree/differ correctly.
+    // With a port header from a Transform Rule, compare both outcomes.
     let with_port = H3Observation {
         observed_port: Some(40001),
         ..base.clone()
