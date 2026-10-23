@@ -16,7 +16,9 @@ test("only public IPv4 UDP srflx candidates can enter peer signaling",()=>{
 
 test("SDP cannot smuggle LAN/overlay/IPv6 candidates around the trickle filter",()=>{
   const sdp="v=0\r\na=ice-ufrag:secret\r\na=candidate:host 1 udp 1 100.64.0.1 4567 typ host\r\na=candidate:v6 1 udp 1 2001:4860::1 1234 typ host\r\na=end-of-candidates\r\n";
-  assert.equal(signalingSdp(sdp),"v=0\r\na=ice-ufrag:secret\r\n");
+  for(const input of [sdp,sdp.replaceAll("\r\n","\n")]) {
+    assert.equal(signalingSdp(input),"v=0\r\na=ice-ufrag:secret\r\n");
+  }
 });
 
 test("selection is obtained from transport, never inferred from nomination alone",()=>{

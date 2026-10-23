@@ -35,7 +35,7 @@ class Experiment {
   start() {
     this.pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.cloudflare.com:3478"}],iceCandidatePoolSize:0});
     this.pc.onicecandidate=e=>{
-      if(this.ended || !e.candidate)return;
+      if(this.ended || this.done || !e.candidate)return;
       const candidate=this.acceptedCandidate(e.candidate);
       if(candidate) {
         if(!this.local.some(c=>c.address===candidate.address && c.port===candidate.port))this.local.push(candidate);
@@ -68,7 +68,7 @@ class Experiment {
     return parsed?.protocol==="udp" && ["host","srflx"].includes(parsed.type) ? parsed : null;
   }
   async onSignal(data) {
-    if(this.ended)return;
+    if(this.ended || this.done)return;
     switch(data.type) {
       case "hello": this.hello(data);break;
       case "ready": await this.connect();break;

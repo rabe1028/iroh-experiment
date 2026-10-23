@@ -36,7 +36,7 @@ export function srflxCandidate(candidate) {
 }
 export function signalingSdp(sdp) {
   // Only explicitly filtered IPv4 srflx candidates travel in separate messages.
-  return sdp.split("\r\n").filter(line=>!line.startsWith("a=candidate:") && line!=="a=end-of-candidates").join("\r\n");
+  return sdp.split(/\r?\n/).filter(line=>!line.startsWith("a=candidate:") && line!=="a=end-of-candidates").join("\r\n");
 }
 export function selectedPath(stats) {
   const reports = [...stats.values()];
