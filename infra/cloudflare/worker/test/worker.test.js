@@ -114,6 +114,24 @@ test("missing static asset binding fails explicitly without changing the observe
   assert.equal((await worker.fetch(request("/observe"))).status, 200);
 });
 
+test("iroh Wasm assets are allowlisted and relay CSP applies only to the iroh page", async () => {
+  const env = { ASSETS: { fetch: async req => new Response(new URL(req.url).pathname) } };
+  for (const path of ["/iroh", "/iroh.js", "/iroh-invite.js", "/iroh-wasm/browser_iroh.js", "/iroh-wasm/browser_iroh_bg.wasm"]) {
+    const response = await worker.fetch(request(path), env);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), path);
+    const csp = response.headers.get("content-security-policy");
+    assert.equal(csp.includes("'wasm-unsafe-eval'"), path === "/iroh");
+    assert.equal(csp.includes("wss://aps1-1.relay.n0.iroh.link"), path === "/iroh");
+    assert.equal(csp.includes("'unsafe-eval'"), false);
+    assert.equal((await worker.fetch(request(path, { method: "POST" }), env)).status, 405);
+  }
+  assert.equal((await worker.fetch(request("/iroh-wasm/private.wasm"), env)).status, 404);
+  const oldCsp = (await worker.fetch(request("/test"), env)).headers.get("content-security-policy");
+  assert.equal(oldCsp.includes("iroh.link"), false);
+  assert.equal(oldCsp.includes("wasm-unsafe-eval"), false);
+});
+
 test("signaling rejects cross-origin, invalid rooms and missing bindings before forwarding", async()=>{
   const path="/signal/"+Date.now()+"-12345678-1234-4321-8321-123456789abc";
   assert.equal((await worker.fetch(request(path))).status,403);

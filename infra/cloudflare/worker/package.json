@@ -4,6 +4,8 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
+    "build:iroh": "node scripts/build-iroh.mjs",
+    "predeploy": "npm run build:iroh",
     "test": "node --test",
     "dev": "wrangler dev",
     "check": "wrangler deploy --dry-run --outdir .wrangler/build",

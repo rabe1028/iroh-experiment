@@ -314,3 +314,55 @@ HTTPとWebRTCは別socketで、アドレス一致をsame-socket証拠に使わ�
 参考: [WebRTC signaling / ICE](https://webrtc.org/getting-started/peer-connections)、
 [選択されたcandidate pairの取得](https://developer.mozilla.org/en-US/docs/Web/API/RTCTransportStats/selectedCandidatePairId)、
 [Durable ObjectsのWebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)。
+
+### Browser内のiroh（relay接続）
+
+`/iroh` は Rust の `iroh = 1.0.3` を `wasm32-unknown-unknown` にコンパイルし、
+スマホとPCのブラウザ内でそれぞれ本物の `iroh::Endpoint` を起動する。
+Cloudflare Worker は静的ページ・Wasmの配信のみを担当する。
+既存の `/peer` はWebRTCの別実験であり、irohの検証には使わない。
+
+標準のirohブラウザ実装は raw UDP を開かず、QUICのパケットを n0 の公開relayまでの
+WebSocketで運ぶ。このページで確認するのは端末IDの認証、暗号化されたQUICストリーム、
+64KiBの内容一致、および通信前後の選択relay経路である。
+**UDP直接接続、NAT hole punching、same-socket STUN/H3を検証したことにはならない。**
+`nat_traversal_tested=false`、`nat_traversal_success=null` を常に維持する。
+実際の別NAT・直接UDPの検証には上記のnative `nat-peer` を使う。
+
+公式の根拠:
+- [browser-echo example](https://github.com/n0-computer/iroh-examples/tree/main/browser-echo)
+- [browser support announcement and direct-connection limitation](https://www.iroh.computer/blog/iroh-0-33-0-browsers-and-discovery-and-0-RTT-oh-my)
+- pinned source: `vendor/iroh/src/endpoint/presets.rs`、`vendor/iroh/src/socket.rs` と
+  `iroh-relay 1.0.3/src/client.rs` の `wasm_browser` 分岐。
+
+実験手順:
+1. PCで `https://<observer-host>/iroh` を開き「irohを起動してリンクをつくる」。
+2. 表示されたリンクをスマホで開き「irohを起動して参加」。両端とも画面を開いたままにする。
+3. 両端の64KiB往復成功・relay表示を確認し、それぞれJSONを保存する。
+   同じPCの2タブでもrelayの実装確認はできるが、別端末実験とは記録しない。
+4. relay準備は25秒、接続後の転送は60秒、招待全体は10分で打ち切る。
+   終了後30秒でEndpointを閉じる。失敗はrelay/接続/転送の未完了であり、NAT失敗ではない。
+
+招待のEndpointId・128bitランダムcapability・期限はURL fragmentにだけ載せ、WorkerのAPIや
+Durable Objectで交換しない。DNS lookupへのID公開も行わない。capabilityごとのALPNで1回だけ
+acceptし、接続したい相手にだけリンクを渡す。relayは実験用の公開APサーバー1台に固定するため、
+その障害から一般的なiroh接続性を推定しない。
+
+Wasmのビルド（生成物はgitignore、deploy前に必須）:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.127 --locked
+cd infra/cloudflare/worker
+npm run build:iroh
+npm test
+npm run check
+npm run deploy
+```
+
+macOSのApple clangはWasmのCコードをコンパイルできない場合がある。その場合はWasm対応LLVMを
+用意し、`CC_wasm32_unknown_unknown=/path/to/llvm/bin/clang` と
+`AR_wasm32_unknown_unknown=/path/to/llvm/bin/llvm-ar` を `npm run build:iroh` に渡す。
+Xcode license未同意の環境では `DEVELOPER_DIR=/Library/Developer/CommandLineTools` も指定する。
+CLIとRust側wasm-bindgenのバージョンは一致が必須で、ビルドスクリプトで検証する。
+CSPのWasm実行許可とrelay接続先の許可は `/iroh` 文書だけに追加する。
