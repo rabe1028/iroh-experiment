@@ -37,6 +37,15 @@ H3 uses an independent WebPKI TLS client configuration; ordinary iroh identity a
 The API adaptation uses noq's ordered `read_chunk(max)` returning `Bytes`, and removes the obsolete Quinn `IllegalOrderedRead` error arm.
 The application keeps the old `h3_quinn`/`quinn` import aliases to make the adapter substitution easy to review.
 
+## Observed peer path isolation
+
+`QuicTransportConfigBuilder::disable_path_discovery()` is an opt-in experiment setting
+under `unstable-raw-udp`. It disables QUIC NAT traversal candidate exchange, multipath,
+and observed-address reports. Server handshake migration retains iroh's required default.
+The experiment application additionally checks authenticated peer identity and the exact
+observed IP/port before and throughout echo, rejecting unexpected paths or lost path events.
+Ordinary endpoints keep the upstream configuration defaults.
+
 ## Truncated UDP receive retry
 
 The single-message Unix receive path in noq-udp 1.1.1 reuses `msghdr` after a truncated packet.
@@ -47,7 +56,7 @@ This also protects builds without the same-socket feature: the fix is in the sha
 
 ## Review and maintenance
 
-[patches/iroh-same-socket.patch](patches/iroh-same-socket.patch), [patches/h3-noq.patch](patches/h3-noq.patch), and [patches/noq-udp-truncation.patch](patches/noq-udp-truncation.patch) contain the changes relative to the published snapshots, excluding copied license texts.
+[patches/iroh-same-socket.patch](patches/iroh-same-socket.patch), [patches/h3-noq.patch](patches/h3-noq.patch), [patches/noq-udp-truncation.patch](patches/noq-udp-truncation.patch), and [patches/iroh-observed-path.patch](patches/iroh-observed-path.patch) contain the changes relative to the published snapshots, excluding copied license texts.
 To review a future refresh, compare those files against the next pinned upstream version; do not update the registry cache in place.
 The rest of the upstream files are retained, including notices. Vendor crates are excluded from workspace membership.
 

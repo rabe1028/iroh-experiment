@@ -167,6 +167,19 @@ impl QuicTransportConfigBuilder {
         QuicTransportConfig(Arc::new(self.0))
     }
 
+    /// Disables automatic peer address discovery and multipath for controlled
+    /// same-socket experiments. Peers must exchange their observed addresses
+    /// out of band; applications must still validate the actual network path.
+    /// Normal iroh defaults and identity authentication are unchanged.
+    #[cfg(all(not(wasm_browser), feature = "unstable-raw-udp"))]
+    pub fn disable_path_discovery(mut self) -> Self {
+        self.0.max_remote_nat_traversal_addresses(0);
+        self.0.max_concurrent_multipath_paths(0);
+        self.0.send_observed_address_reports(false);
+        self.0.receive_observed_address_reports(false);
+        self
+    }
+
     /// Maximum number of incoming bidirectional streams that may be open concurrently.
     ///
     /// Must be nonzero for the peer to open any bidirectional streams.

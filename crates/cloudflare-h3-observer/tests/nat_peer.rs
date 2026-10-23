@@ -84,25 +84,29 @@ async fn exercise(allow_private: bool, wrong_run: bool) -> Vec<serde_json::Value
             .await
             .unwrap();
     }
+    let mut outputs = Vec::new();
     for child in children {
         let output = tokio::time::timeout(Duration::from_secs(12), child.wait_with_output())
             .await
             .unwrap()
             .unwrap();
-        if allow_private && !wrong_run {
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        } else {
-            assert!(!output.status.success());
-        }
+        outputs.push(output);
     }
     server.await.unwrap();
     let mut reports = Vec::new();
     for role in ["listen", "dial"] {
         reports.push(read(&root.join(format!("{role}.result.json"))).await);
+    }
+    for output in outputs {
+        if allow_private && !wrong_run {
+            assert!(
+                output.status.success(),
+                "{}; reports={reports:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        } else {
+            assert!(!output.status.success());
+        }
     }
     reports
 }
@@ -116,6 +120,8 @@ async fn direct_echo_uses_only_observed_candidates_and_marks_local_diagnostic() 
     for report in exercise(true, false).await {
         assert_eq!(report["candidate_registered"], true);
         assert_eq!(report["same_socket_as_iroh"], true);
+        assert_eq!(report["automatic_path_discovery_disabled"], true);
+        assert_eq!(report["observed_peer_path_only"], true);
         assert_eq!(report["direct_connection_success"], true);
         assert_eq!(report["echo_success"], true);
         assert_eq!(report["payload_bytes"], 65536);
@@ -147,8 +153,7 @@ async fn stale_candidate_from_another_run_is_rejected_before_dial() {
     }
 }
 
-#[tokio::test]
-async fn rejected_echo_cannot_be_reported_as_success() {
+async fn exercise_test_client(wrong_advertised_address: bool) -> serde_json::Value {
     let root = std::env::temp_dir().join(format!("iroh-nat-reject-{}", rand::random::<u64>()));
     tokio::fs::create_dir_all(&root).await.unwrap();
     let _temp = Temp(root.clone());
@@ -207,7 +212,13 @@ async fn rejected_echo_cannot_be_reported_as_success() {
     let mut peer = own.clone();
     peer["role"] = "dial".into();
     peer["endpoint_id"] = serde_json::to_value(endpoint.id()).unwrap();
-    peer["addr"] = endpoint.bound_sockets()[0].to_string().into();
+    let actual_addr = endpoint.bound_sockets()[0];
+    let advertised_addr = if wrong_advertised_address {
+        std::net::SocketAddr::new("127.0.0.2".parse().unwrap(), actual_addr.port())
+    } else {
+        actual_addr
+    };
+    peer["addr"] = advertised_addr.to_string().into();
     tokio::fs::write(root.join("peer.tmp"), serde_json::to_vec(&peer).unwrap())
         .await
         .unwrap();
@@ -217,25 +228,56 @@ async fn rejected_echo_cannot_be_reported_as_success() {
     let target =
         iroh::EndpointAddr::new(serde_json::from_value(own["endpoint_id"].clone()).unwrap())
             .with_ip_addr(own["addr"].as_str().unwrap().parse().unwrap());
-    let conn = endpoint
+    let connection = endpoint
         .connect(target, b"iroh-experiment/nat-echo/1")
-        .await
-        .unwrap();
-    let (mut send, mut recv) = conn.open_bi().await.unwrap();
-    recv.stop(0u32.into()).unwrap();
-    let expected: Vec<u8> = (0..65536).map(|i| (i % 251) as u8).collect();
-    send.write_all(&expected).await.unwrap();
-    send.finish().unwrap();
+        .await;
+    if !wrong_advertised_address {
+        assert!(connection.is_ok());
+    }
+    if let Ok(conn) = connection {
+        let _ = async {
+            let (mut send, mut recv) = conn.open_bi().await?;
+            if !wrong_advertised_address {
+                recv.stop(0u32.into())?;
+            }
+            let expected: Vec<u8> = (0..65536).map(|i| (i % 251) as u8).collect();
+            send.write_all(&expected).await?;
+            send.finish()?;
+            if wrong_advertised_address {
+                let _ = recv.read_to_end(65536).await;
+            }
+            anyhow::Ok(())
+        }
+        .await;
+    }
     assert!(!tokio::time::timeout(Duration::from_secs(12), child.wait())
         .await
         .unwrap()
         .unwrap()
         .success());
     let report = read(&root.join("result.json")).await;
+    endpoint.close().await;
+    server.await.unwrap();
+    report
+}
+
+#[tokio::test]
+async fn rejected_echo_cannot_be_reported_as_success() {
+    let report = exercise_test_client(false).await;
     assert_eq!(report["direct_connection_success"], true);
     assert_eq!(report["echo_success"], false);
     assert_eq!(report["payload_bytes"], 0);
     assert!(report["failure_reason"].is_string());
-    endpoint.close().await;
-    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn authenticated_connection_from_an_unobserved_address_is_rejected() {
+    let report = exercise_test_client(true).await;
+    assert_eq!(report["direct_connection_success"], false);
+    assert_ne!(report["echo_success"], true);
+    assert_eq!(report["observed_peer_path_only"], false);
+    assert!(report["failure_reason"]
+        .as_str()
+        .unwrap()
+        .contains("unobserved peer address"));
 }

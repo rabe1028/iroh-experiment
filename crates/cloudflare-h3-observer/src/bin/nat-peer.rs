@@ -9,10 +9,11 @@ use std::{
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use iroh::{
-    endpoint::{presets, Connection},
-    Endpoint, EndpointAddr, EndpointId, RelayMode,
+    endpoint::{presets, Connection, PathEvent, QuicTransportConfig},
+    Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr,
 };
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 const ALPN: &[u8] = b"iroh-experiment/nat-echo/1";
 const PAYLOAD_BYTES: usize = 64 * 1024;
@@ -87,6 +88,8 @@ struct Report {
     peer_observation: Option<Candidate>,
     candidate_registered: bool,
     same_socket_as_iroh: bool,
+    automatic_path_discovery_disabled: bool,
+    observed_peer_path_only: bool,
     different_observed_ips: Option<bool>,
     ipv4_pair: Option<bool>,
     direct_connection_success: Option<bool>,
@@ -162,11 +165,17 @@ async fn write_json(path: &std::path::Path, data: &impl Serialize) -> Result<()>
 async fn run(args: &Args, report: &mut Report) -> Result<()> {
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
+        .transport_config(
+            QuicTransportConfig::builder()
+                .disable_path_discovery()
+                .build(),
+        )
         .clear_ip_transports()
         .bind_addr(args.bind)?
         .alpns(vec![ALPN.to_vec()])
         .bind()
         .await?;
+    report.automatic_path_discovery_disabled = true;
     let result = run_endpoint(args, &endpoint, report).await;
     endpoint.close().await;
     result
@@ -211,12 +220,14 @@ async fn run_endpoint(args: &Args, endpoint: &Endpoint, report: &mut Report) -> 
         conn.remote_id() == report.peer_observation.as_ref().unwrap().endpoint_id,
         "unexpected authenticated peer"
     );
-    check_direct(&conn)?;
+    let expected_addr = report.peer_observation.as_ref().unwrap().addr;
+    check_direct(&conn, expected_addr)?;
     report.direct_connection_success = Some(true);
     report.selected_path = Some("direct-ip");
     report.time_to_connect_ms = Some(started.elapsed().as_millis() as u64);
     report.echo_success = Some(false);
-    echo(&conn, args.role).await?;
+    echo_on_observed_path(&conn, args.role, expected_addr).await?;
+    report.observed_peer_path_only = true;
     report.echo_success = Some(true);
     report.payload_bytes = PAYLOAD_BYTES;
     Ok(())
@@ -354,6 +365,35 @@ async fn connect_peer(
     .context("direct connection timeout")?
 }
 
+async fn echo_on_observed_path(
+    conn: &Connection,
+    role: Role,
+    expected_addr: SocketAddr,
+) -> Result<()> {
+    // Subscribe before the snapshot to cover changes between it and echo I/O.
+    let mut events = conn.path_events();
+    check_direct(conn, expected_addr)?;
+    let transfer = echo(conn, role);
+    tokio::pin!(transfer);
+    let mut events_ended = false;
+    loop {
+        tokio::select! {
+            biased;
+            event = events.next(), if !events_ended => match event {
+                Some(event) => check_event(&event, expected_addr)?,
+                None => events_ended = true,
+            },
+            result = &mut transfer => { result?; break; }
+        }
+    }
+    // A normally closed connection may have no remaining paths. Any paths
+    // still present must agree with the sole observed peer candidate.
+    for path in conn.paths().iter() {
+        check_addr(path.remote_addr(), expected_addr)?;
+    }
+    Ok(())
+}
+
 async fn echo(conn: &Connection, role: Role) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(10), async {
         let expected: Vec<u8> = (0..PAYLOAD_BYTES).map(|i| (i % 251) as u8).collect();
@@ -381,14 +421,40 @@ async fn echo(conn: &Connection, role: Role) -> Result<()> {
     .context("echo timeout")?
 }
 
-fn check_direct(conn: &Connection) -> Result<()> {
+fn check_direct(conn: &Connection, expected: SocketAddr) -> Result<()> {
     let paths = conn.paths();
-    anyhow::ensure!(paths.iter().all(|p| !p.is_relay()), "relay path observed");
+    for path in paths.iter() {
+        check_addr(path.remote_addr(), expected)?;
+    }
     anyhow::ensure!(
         paths.iter().any(|p| p.is_selected() && !p.is_relay()),
         "no selected direct path"
     );
     Ok(())
+}
+
+fn check_addr(addr: &TransportAddr, expected: SocketAddr) -> Result<()> {
+    let TransportAddr::Ip(actual) = addr else {
+        anyhow::bail!("non-IP path observed");
+    };
+    anyhow::ensure!(
+        SocketAddr::new(actual.ip().to_canonical(), actual.port())
+            == SocketAddr::new(expected.ip().to_canonical(), expected.port()),
+        "unobserved peer address: {actual}"
+    );
+    Ok(())
+}
+
+fn check_event(event: &PathEvent, expected: SocketAddr) -> Result<()> {
+    match event {
+        PathEvent::Opened { remote_addr, .. }
+        | PathEvent::Selected { remote_addr, .. }
+        | PathEvent::Closed { remote_addr, .. } => check_addr(remote_addr, expected),
+        PathEvent::Lagged { .. } => {
+            anyhow::bail!("path event history lost; result cannot prove the observed path")
+        }
+        _ => anyhow::bail!("unrecognized path event"),
+    }
 }
 
 fn public_ip(ip: IpAddr) -> bool {

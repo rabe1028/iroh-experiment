@@ -36,8 +36,9 @@ STUN 53の応答がなかった理由も、今回の測定だけでは遮断と�
 ## peer接続の進捗
 
 `nat-peer`でCloudflare観測candidateだけを交換し、relay無効のiroh接続で64KiBを往復する経路を用意した。
+QUICの自動candidate交換を無効化し、通信中も観測した相手IP/port以外の経路を拒否する。
 ローカルの模擬STUNを使う別プロセス間テストでは成功し、
-private/Tailscale candidate、別runのcandidate、echo受信拒否を成功扱いしないことも確認した。
+private/Tailscale candidate、別runのcandidate、観測外addressからの認証済み接続、echo受信拒否を成功扱いしないことも確認した。
 
 同じMacの2プロセスで実Cloudflareのpublic candidateを使う診断も各方式1組試したが、
 片側のSTUN/H3観測でtimeoutしたためpeer接続は未実行。NAT越え失敗としては数えない。

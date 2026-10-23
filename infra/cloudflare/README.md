@@ -248,6 +248,8 @@ listenerも相手の観測candidateへQUIC接続を開始してNAT filterを開�
 
 - `same_socket_as_iroh`・`candidate_registered`: 観測とpeer接続が同じEndpoint。
 - `direct_connection_success`: 認証済みiroh接続でdirect pathを選択。未試行はnull。
+- `automatic_path_discovery_disabled`: QUICの追加candidate交換・multipath・observed-address reportを無効化。
+- `observed_peer_path_only`: 通信中も観測した相手IP/portだけを使ったことを確認。経路event欠落時は成功扱いしない。
 - `echo_success`・`payload_bytes: 65536`: データ往復の確認。接続だけの成功とは区別する。
 - `ipv4_pair: true`・`different_observed_ips: true`: IPv4で異なる外部IP。実際に別回線へ接続したことも確認する。
 
