@@ -118,6 +118,23 @@ async fn endpoint(bind: &str) -> Endpoint {
 }
 
 #[tokio::test]
+async fn explicit_edge_address_still_rejects_an_untrusted_certificate() {
+    let endpoint = endpoint("127.0.0.1:0").await;
+    let mock = mock("127.0.0.1:0", vec![]).await;
+    let error = cloudflare_h3_observer::observe_on_endpoint_at(
+        &endpoint,
+        mock.addr,
+        HOST,
+        "/observe",
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("certificate"), "{error:#}");
+    endpoint.close().await;
+}
+
+#[tokio::test]
 async fn stun_h3_and_iroh_share_the_actual_udp_port() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let endpoint = endpoint("127.0.0.1:0").await;

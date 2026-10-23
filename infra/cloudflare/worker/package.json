@@ -1,0 +1,18 @@
+{
+  "name": "iroh-h3-observer",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test",
+    "dev": "wrangler dev",
+    "check": "wrangler deploy --dry-run --outdir .wrangler/build",
+    "login": "wrangler login",
+    "whoami": "wrangler whoami",
+    "configure": "node scripts/configure.mjs",
+    "setup-zone": "node scripts/setup-zone.mjs",
+    "deploy": "wrangler deploy --config wrangler.local.json",
+    "probe": "node scripts/probe.mjs"
+  },
+  "devDependencies": { "wrangler": "4.152.0" }
+}

@@ -153,16 +153,7 @@ pub async fn observe_on_endpoint(
             .context("DNS resolution")?;
         let mut last_error = anyhow!("no usable DNS addresses for the endpoint's IP sockets");
         for addr in addresses {
-            match observe_on_endpoint_with_config(
-                endpoint,
-                addr,
-                host,
-                path,
-                timeout,
-                client_config(host)?,
-            )
-            .await
-            {
+            match observe_on_endpoint_at(endpoint, addr, host, path, timeout).await {
                 Ok(mut observation) => {
                     observation.duration = started.elapsed();
                     return Ok(observation);
@@ -174,6 +165,19 @@ pub async fn observe_on_endpoint(
     })
     .await
     .map_err(|_| anyhow!("probe timed out after {timeout:?}"))?
+}
+
+/// Probe a known edge address while validating the original hostname with
+/// WebPKI. Useful for diagnosing a stale local DNS resolver without changing
+/// system DNS, SNI, HTTP authority, or certificate verification.
+pub async fn observe_on_endpoint_at(
+    endpoint: &iroh::Endpoint,
+    addr: SocketAddr,
+    host: &str,
+    path: &str,
+    timeout: Duration,
+) -> Result<H3Observation> {
+    observe_on_endpoint_with_config(endpoint, addr, host, path, timeout, client_config(host)?).await
 }
 
 /// Same-endpoint probe with an explicit address and TLS configuration.
