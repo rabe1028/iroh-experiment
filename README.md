@@ -3,6 +3,8 @@
 iroh Serverless NAT Traversal / Direct Media Path 実験のリポジトリ。
 詳細は `EXPERIMENT_PLAN.md` を参照。
 
+予備測定の数値・制約は[2026-10-23の結果](results/2026-10-23-preflight.md)を参照。
+
 ## 対象バージョン
 
 - iroh: **1.0.3**（same-socket拡張を含む`vendor/iroh`へ固定）
@@ -10,19 +12,19 @@ iroh Serverless NAT Traversal / Direct Media Path 実験のリポジトリ。
 
 ## 現在の進捗（2026-10-23）
 
-STUN・H3のsame-socket統合まで実装済み。Cloudflare STUN 3478への単発観測を確認し、Cloudflare H3でのIP・port観測とcandidate登録も確認。実NAT越えの比較測定はこれから。
+STUN・H3のsame-socket統合まで実装済み。Cloudflare STUN 3478への単発観測を確認し、Cloudflare H3でのIP・port観測とcandidate登録も確認。同じlive socketでSTUN/H3のIP・port一致を7回確認。別NAT間のpeer接続はテザリング側PCの準備待ち。
 以下はコードの実装状況であり、実環境での合格を示すものではない。
 
 | 項目 | 状況 | 残作業・制約 |
 |---|---|---|
 | E0 Baseline | echo・path telemetry・JSONL出力を実装 | 実ネットワーク測定 |
 | Raw TCP tunnel | service routing・EndpointId認可・互換性テストを実装 | short-lived capabilityは未実装 |
-| Cloudflare STUN | 同一UDP socketで観測・応答分離・external address登録を実装 | 3478の実測成功。53は今回の短い試行で未成功。実NAT比較は未実施 |
-| HTTP/3 observer | 同一noq Endpoint・socketでH3観測とSTUN比較。完全なaddressはirohへ登録。Worker・設定生成・zone設定補助を用意 | 実zone配置・H3単独probe成功（edge IP明示）。通常DNS・STUN比較・実NATは継続評価 |
+| Cloudflare STUN | 同一UDP socketで観測・応答分離・external address登録を実装 | 3478は成功とtimeoutが混在。53は各mode 3runで応答なし。実NAT比較は未実施 |
+| HTTP/3 observer | 同一noq Endpoint・socketでH3観測とSTUN比較。完全なaddressはirohへ登録。Worker・設定生成・zone設定補助を用意 | 通常DNSでのH3観測成功。live STUN比較はIPv4 4/5・IPv6 3/3完了し全件一致。別NAT間peer検証は未実施 |
 | Media separation | Endpoint分離・relay無効化・停止gate・合成stream・media socket上のSTUNを実装 | 実NAT・長時間・UDP遮断試験。relay byte数は未計測（null） |
 | Fly.io QAD-only | 未実装 | デプロイ定義・基準測定 |
 | Durable Object relay | 未実装 | relay protocol・Ping間隔実験 |
-| 実験基盤・最終report | 未実装 | NAT環境・matrix runner・匿名化・集計。追跡済み測定結果なし |
+| 実験基盤・最終report | direct-only `nat-peer`と予備測定reportを追加 | 別NAT環境・matrix runner・最終集計 |
 
 2026-10-23にCommand Line Toolsを選択してworkspaceテストを実行し、成功。
 STUN/H3/irohの実際の送信元port一致、IPv4/IPv6、並列probe、送信元・transaction検証、終了時のキャンセル、candidate登録、TCP互換性、mediaの正常転送・接続切断を確認した。
