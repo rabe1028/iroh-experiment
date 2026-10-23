@@ -10,7 +10,8 @@ STUNとH3はirohの同じUDP socketから観測できる。Fly QADやDurable Obj
 - Cloudflare STUN 3478のsame-socket観測とcandidate登録に成功。53は1秒・1回の試行で未成功（遮断の断定はしない）。
 - Cloudflareの実zoneへWorkerを配置し、port返却Transform RuleとCache bypassを有効化。既存のHTTP/3有効設定を確認。
 - 公開DNSで解決したedge IPを明示したH3単独probeに成功。同じiroh socketでIP・portを観測しcandidate登録を確認。実NAT間のdirect接続は未検証。
-- このMacの通常DNSは新hostnameを未解決。今回のSTUN再試行はtimeout。初回の3478成功とは別runとして記録。
+- その後の予備実験では通常DNSが成功。live比較はIPv4 4/5回、IPv6 3/3回完了し、完了した7回はIP・portが一致。IPv4の1回はSTUN timeoutでH3未実行。
+- STUN単独3478は成功とtimeoutが混在。53は両modeとも各3runで応答なし。詳細と制約は[予備測定結果](../../results/2026-10-23-preflight.md)。
 - アカウントID・実domain・token・生の観測結果はcommitしない。rawは`results/raw/`へ保存。
 
 ## 仕様確認と訂正
@@ -197,6 +198,64 @@ cargo run --locked --bin media-sender -- <CONTROL_EP_ID> \
 mediaは別EndpointId・relay無効のまま。controlは既存iroh基盤を使い、DO relayは未実装。
 このオプションは観測とcandidate交換への統合であり、両側NATのhole punching成功を保証しない。
 LANまたは到達性を確認したmappingから始め、実NAT間の接続成功率・双方向のcandidate交換は別途評価する。
+
+## 6. 別回線のnative peerで接続を確認する
+
+`nat-peer`はSTUNまたはH3で観測した**同じEndpointのaddressだけ**を相手に渡し、
+relay無効のiroh接続で64KiBを往復する小さな実験用binary。
+LAN・loopback・Tailscaleの100.64/10・ULA等は既定で拒否する。
+Tailscale/SSHはbinaryの配置・操作・candidate file交換にだけ使う。
+iroh relay、N0 discovery、LAN候補の自動追加は使用しない。
+
+```sh
+export DEVELOPER_DIR=/Library/Developer/CommandLineTools  # このMacで必要な場合
+cargo build --locked --bin nat-peer
+```
+
+自宅側とテザリング側で同じ新しい`NAT_RUN_ID`を使い、双方に新規run directoryを用意する。
+自宅側で`NAT_RUN_ID=$(uuidgen)`を生成し、同じ値を相手側にも設定する。
+例はH3。`observe.example.invalid`は設定済みhostnameへ置き換える。
+
+```sh
+# 自宅側。先にテザリング側の回線切替・binary配置を済ませてから起動する
+target/debug/nat-peer --method h3 --role listen --run-id "$NAT_RUN_ID" \
+  --h3-host observe.example.invalid \
+  --candidate-out "results/raw/$NAT_RUN_ID/home.candidate.json" \
+  --peer-file "results/raw/$NAT_RUN_ID/mobile.peer.json" \
+  --results "results/raw/$NAT_RUN_ID/home.result.json"
+
+# テザリング側の別PC。同じrun idを指定する
+target/debug/nat-peer --method h3 --role dial --run-id "$NAT_RUN_ID" \
+  --h3-host observe.example.invalid \
+  --candidate-out "results/raw/$NAT_RUN_ID/mobile.candidate.json" \
+  --peer-file "results/raw/$NAT_RUN_ID/home.peer.json" \
+  --results "results/raw/$NAT_RUN_ID/mobile.result.json"
+```
+
+双方の`READY`を確認したら、各candidate fileを相手の`--peer-file`へSSH等で交換する。
+途中のJSONを読まないよう、一旦別名へcopyしてからrenameする。
+既存fileへの上書きは拒否するため、再試行は新しいrun id・directoryで行う。
+Endpointはfile待ちの間も生きたまま。既定では観測から30秒を超えたcandidateの接続試行は拒否する。
+準備に時間がかかった場合は両側を再起動し、fresh candidateを交換する。
+候補交換は最大120秒、接続試行20秒、echo10秒で終了する。
+
+STUNを試す場合は新規runで`--method stun --stun-server stun.cloudflare.com:3478`に置き換える。
+H3の明示edge IP診断には`--resolve <EDGE_IP>`、IPv6には双方で`--bind '[::]:0'`を指定できる。
+listenerも相手の観測candidateへQUIC接続を開始してNAT filterを開きながらincoming接続を待つ。
+これは観測addressに向けた同時送信の実験で、mapping refreshやport予測を含む一般的なNAT traversal実装ではない。
+
+両側のresultで次を確認する。
+
+- `same_socket_as_iroh`・`candidate_registered`: 観測とpeer接続が同じEndpoint。
+- `direct_connection_success`: 認証済みiroh接続でdirect pathを選択。未試行はnull。
+- `automatic_path_discovery_disabled`: QUICの追加candidate交換・multipath・observed-address reportを無効化。
+- `observed_peer_path_only`: 通信中も観測した相手IP/portだけを使ったことを確認。経路event欠落時は成功扱いしない。
+- `echo_success`・`payload_bytes: 65536`: データ往復の確認。接続だけの成功とは区別する。
+- `ipv4_pair: true`・`different_observed_ips: true`: IPv4で異なる外部IP。実際に別回線へ接続したことも確認する。
+
+IPv6 direct成功や同じ外部IPでの成功は、それぞれglobal IPv6到達性・hairpin等の確認として分ける。
+ローカルテスト用`--allow-private-peer`のrunも別NAT間の成功には数えない。
+raw candidate/resultは実IP・一時EndpointIdを含むため公開しない。
 
 ## APIと実験上の制約
 
