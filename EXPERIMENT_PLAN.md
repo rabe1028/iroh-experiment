@@ -732,7 +732,7 @@ actual direct peer source addr
 
 ## E3. Cloudflare HTTP/3疑似QAD
 
-**現状:** 同じnoq Endpoint・UDP socketからH3接続し、live STUN比較と完全なaddressのiroh登録まで実装済み。ローカルH3 serverで実際の送信元port一致とTLS検証を確認。対象Cloudflare zoneへの設定・実測は未実施。
+**現状:** 同じnoq Endpoint・UDP socketからH3接続し、live STUN比較と完全なaddressのiroh登録まで実装済み。ローカルH3 serverで実際の送信元port一致とTLS検証を確認。対象Cloudflare zoneへの設定・実測を完了し、live same-socket比較が完了した7回すべてでSTUN/H3のIP・portが一致した。別NAT間のiroh peer接続は未検証。
 Worker単体例ではportは欠測となる。Transform Ruleでportを付与できれば、その値も解析・比較・登録できる。
 
 ### 目的
@@ -1335,10 +1335,12 @@ development cost
 | PR 2 Raw TCP tunnel | 実装・互換性テスト取り込み済み |
 | PR 3 Fly QAD-only | 未着手 |
 | PR 4 Same-socket STUN | same-socket tap・candidate登録を追加。ローカルとCloudflare 3478で確認 |
-| PR 5 HTTP/3 observer | same-noq EndpointのH3とlive STUN比較を追加。zone実測は未完了 |
+| PR 5 HTTP/3 observer | same-noq EndpointのH3とlive STUN比較を追加。zone実測でSTUN/H3のIP・port一致を7回確認。別NAT間iroh接続は未検証 |
 | PR 6 Media separation | 実装・ローカルテスト取り込み済み。実NAT・長時間・UDP遮断は未検証 |
 | PR 7 Durable Object relay | 未着手 |
 | PR 8 Final report | 未着手 |
+
+追加のブラウザ試験として`/test`のH3/STUN予備測定と、`/peer`のTURNなしWebRTC DataChannel試験を用意した。WebRTC signaling用DOはiroh relay protocolの実装ではなく、PR 7の完了とは扱わない。スマホからのH3/STUN観測は提供JSONで確認済み。WebRTCのローカル診断で64KiB往復を確認し、別回線実測は両端JSONで評価する。
 
 ### PR 1: Baseline
 

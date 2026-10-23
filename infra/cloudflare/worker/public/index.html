@@ -44,6 +44,7 @@
       </article>
     </section>
     <aside class="scope"><span class="small-index">読み方</span><div><h2>ここで分かること、次に試すこと。</h2><p>このページで確認できるのは、HTTP/3接続とSTUNのアドレス観測です。<strong>相手端末とのNAT越え・iroh接続はまだ試していません。</strong></p><p>ブラウザのHTTP接続とWebRTCは別socketです。IP・portが一致しても、same-socketの証拠にはなりません。irohの実験には、別回線のPCでnative版を実行します。</p></div></aside>
+    <p class="detail"><a href="/peer">次へ：2台のブラウザで端末間のNAT越えを検証する →</a></p>
     <section class="export"><div><h2>結果を持ち帰る</h2><p>結果はこのページのメモリ内だけに保持します。<br>JSONにはIPアドレスを含むため、公開時は取り除いてください。</p></div><button id="download" type="button" disabled>JSONを保存 <span aria-hidden="true">↓</span></button><p id="export-status" role="status"></p></section>
     <details id="json-details" hidden><summary>JSONを表示（保存できないとき）</summary><pre id="json-output"></pre></details>
     <footer><span>iroh-experiment</span><span>OBSERVE FIRST. VERIFY THE PATH.</span></footer>

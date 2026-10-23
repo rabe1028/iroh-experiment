@@ -51,3 +51,17 @@ Tailscaleは操作・candidate file交換にのみ使用し、データ接続先
 現時点では相手PCの指定と回線切替が未完了で、本測定は未実施。
 
 手順は[Cloudflare実験ガイド](../infra/cloudflare/README.md)を参照。
+
+
+## iOSからの予備測定（提供JSON）
+
+回線ラベル`cellular`の5回のHTTPS観測で、最初の3回は応答待ちtimeout、残る2回はHTTP/3応答だった。
+timeoutした3回の接続方式は不明。成功した2回はsource portを取得し、NRT edgeに接続していた。
+WebRTCによるCloudflare STUNでは、IPv4 UDP srflx候補を1件取得していた。
+H3とSTUNの外部IPは一致しportは異なったが、別socketのためNATのmapping種別は判断しない。
+これはスマホからのH3/STUN観測成功であり、提供JSONでは`nat_traversal_tested: false`のまま。
+実IP・port・User-Agentを含む原本は`results/raw/`へ保存した。
+
+別途`/peer`に、TURNなしのWebRTC端末間試験を追加した。
+ローカル2タブの診断では64KiB往復を両側で確認し、NAT越え成功とは数えていない。
+自宅PCとモバイル回線スマホの本測定は、両端の結果JSONを揃えて評価する。

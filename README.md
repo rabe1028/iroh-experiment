@@ -3,7 +3,7 @@
 iroh Serverless NAT Traversal / Direct Media Path 実験のリポジトリ。
 詳細は `EXPERIMENT_PLAN.md` を参照。
 
-スマホのブラウザからのHTTP/3・STUN予備テストは、配置済みobserverの`/test`で実行できる。[手順](infra/cloudflare/README.md#スマホのブラウザからの予備テスト)を参照。irohの別NAT間接続はnative版で検証する。
+スマホのブラウザからのHTTP/3・STUN予備テストは、配置済みobserverの`/test`で実行できる。[手順](infra/cloudflare/README.md#スマホのブラウザからの予備テスト)を参照。2台のブラウザでのWebRTC端末間試験は同じobserverの`/peer`で実行できる。irohのQUIC経路の別NAT間接続はnative版で検証する。
 
 予備測定の数値・制約は[2026-10-23の結果](results/2026-10-23-preflight.md)を参照。
 

@@ -16,8 +16,16 @@ use media_separation::{
 /// Bind one offline control+media pair. The control endpoint uses the
 /// Minimal preset (no discovery/relay) and explicit-address connects.
 async fn bind_pair() -> anyhow::Result<EndpointPair> {
-    let control = iroh::Endpoint::builder(presets::Minimal).bind().await?;
+    // Keep the advertised candidates confined to loopback so other CI host
+    // interfaces cannot participate in this offline fixture.
+    let control = iroh::Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr("127.0.0.1:0")?
+        .bind()
+        .await?;
     let media = iroh::Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr("127.0.0.1:0")?
         .relay_mode(RelayMode::Disabled)
         .bind()
         .await?;
@@ -84,7 +92,7 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
         let (outcome, _gate) = run_receiver_session(media_conn, started, &token)
             .await
             .unwrap();
-        assert!(outcome.direct_connection_success);
+        assert!(outcome.direct_connection_success, "{outcome:?}");
         assert_eq!(outcome.ever_relay_paths, 0);
     });
 
@@ -114,7 +122,7 @@ async fn happy_path_streams_over_direct_only_media_endpoint() {
             .await
             .unwrap();
 
-    assert!(outcome.direct_connection_success);
+    assert!(outcome.direct_connection_success, "{outcome:?}");
     assert_eq!(outcome.ever_relay_paths, 0);
     assert!(outcome.stream.frames > 50, "expected real frame count");
     assert!(matches!(
@@ -236,6 +244,6 @@ async fn killing_direct_path_stops_media_fail_closed() {
         .await
         .expect("receiver session hung")
         .unwrap();
-    assert!(rx_outcome.stream.frames > 0);
+    assert!(rx_outcome.stream.frames > 0, "{rx_outcome:?}");
     assert_eq!(rx_outcome.ever_relay_paths, 0);
 }

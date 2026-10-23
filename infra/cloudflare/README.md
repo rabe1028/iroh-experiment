@@ -289,3 +289,28 @@ HTTPとWebRTCは別socketで、アドレス一致をsame-socket証拠に使わ�
 
 [WebRTCのICE接続手順](https://webrtc.org/getting-started/peer-connections)と
 [Cloudflare Workersのprotocol対応](https://developers.cloudflare.com/workers/reference/protocols/)を参照。
+
+
+## 2台のブラウザでWebRTCのNAT越えを測る
+
+`https://<observer-host>/peer`をPCで開き、「ルームをつくる」で表示されたリンクを、Wi-Fiをオフにしたスマホで開く。
+スマホで「このルームに参加」を押し、両方をforegroundのままにする。回線ラベルは自己申告。
+相手の参加待ちは10分、参加後の接続・echoは最大90秒。再読み込み・再試行は新しいルームで行う。
+
+- SQLite-backed Durable Object `SignalingRoom`は、SDP/ICEの交換だけをWebSocketで担当する。1ルームは2回の参加で使用済みになる。
+- tokenは時刻＋random UUID v4。URL fragmentで共有し、WebSocket接続時にserverで期限を検査する。Origin一致も要求する。
+- 永続storageには参加数とexpiry alarmだけを置く。SDP/ICEや測定データは保存しない。期限にWebSocketを閉じ、room storageを削除する。
+- TURNを設定せず、SDP内のcandidateを除去し、別messageで公開IPv4 UDP srflx候補だけを交換する。LAN・mDNS・Tailscale・IPv6のcandidateは交換しない。
+- DataChannelで8KiB × 8個のpayloadをechoし、内容一致と完了確認を両端で照合する。payloadはsignal roomを通さない。
+- `getStats()`のselected pairを転送前後に確認し、相手のSTUN外部IPと一致する公開IPv4 UDP経路・両側の異なるSTUN外部IP・同じselected pair・両端の検証結果が揃った場合だけ`nat_traversal_success: true`とする。
+- selected pairの情報が欠ける、同じ外部IP、診断mode等では、echo成功でもNAT越えの判定を`null`とする。転送中にselected pair変更eventを検出した場合も判定を中止する。
+- `transport: webrtc-datachannel`・`iroh_peer_tested: false`を記録。これはirohのQUIC hole punchingやSTUN/H3 same-socket実験の証拠にはしない。
+- 結果JSONは両端のbrowser内だけに保持し、downloadまたは「JSONを表示」で取り出す。IPを含むためraw結果は公開しない。
+
+ローカルdevの`http://127.0.0.1:8787/peer?diagnostic=local`はhost候補を許す通信処理の診断用。
+`diagnostic_private_peers: true`・`ipv4_srflx_only: false`を記録し、NAT越え成功を常に保留する。
+このqueryは公開hostnameでは有効にならない。
+
+参考: [WebRTC signaling / ICE](https://webrtc.org/getting-started/peer-connections)、
+[選択されたcandidate pairの取得](https://developer.mozilla.org/en-US/docs/Web/API/RTCTransportStats/selectedCandidatePairId)、
+[Durable ObjectsのWebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)。
