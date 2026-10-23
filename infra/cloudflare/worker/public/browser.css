@@ -2,3 +2,5 @@
 
 details{margin:0 0 32px;font-size:12px}summary{cursor:pointer;min-height:44px;padding:8px 0}pre{background:#e9ece3;border:1px solid var(--line);border-radius:4px;padding:16px;font:11px/1.8 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto}
 .secondary{display:block;border:1px solid var(--deep);background:transparent;color:var(--deep);border-radius:4px;padding:12px 16px;width:100%;margin-top:12px;font-size:13px;min-height:44px}.secondary[hidden],[hidden]{display:none!important}#invitation{margin-top:25px;padding-top:20px;border-top:1px solid var(--line)}#invitation label{font-size:12px}#room-link{width:100%;min-height:44px;margin-top:8px;padding:10px;border:1px solid var(--line);border-radius:4px;background:var(--white);color:var(--ink);font:11px var(--mono)}.text-button{border:0;background:transparent;color:var(--muted);font-size:11px;min-height:44px}footer a,.scope a{color:inherit}
+
+#join{background:var(--deep);color:var(--white);padding:17px 22px;font-size:15px;font-weight:bold}

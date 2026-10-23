@@ -229,7 +229,7 @@ class Experiment {
     this.finishView();this.cleanup();
   }
   finishView() {
-    el("start").disabled=false;el("join").hidden=true;el("network").disabled=false;
+    el("start").hidden=false;el("start").disabled=false;el("join").hidden=true;el("network").disabled=false;
     showResult(this.report);
   }
   cleanup() {
@@ -243,7 +243,7 @@ class Experiment {
 function begin(token) {
   current?.cleanup();
   el("events").replaceChildren();el("json-details").hidden=true;el("json-details").open=false;
-  el("download").disabled=true;el("start").disabled=true;el("join").hidden=true;
+  el("download").disabled=true;el("start").hidden=true;el("start").disabled=true;el("join").hidden=true;
   el("network").disabled=true;el("stop").disabled=false;el("export-status").textContent="";
   el("echo").textContent="—";el("path").textContent="—";el("nat").textContent="未検証";
   el("state-badge").dataset.tone="neutral";
@@ -258,6 +258,7 @@ function refreshInvitation() {
   const token=new URLSearchParams(location.hash.slice(1)).get("room");
   if(!token || token===current?.token)return;
   if(current && !current.ended && !current.done)current.fail("別の招待リンクを開いたため、前の測定を終了しました。","navigation");
+  el("start").hidden=true;
   el("join").hidden=false;
   el("invitation").hidden=true;
   status("招待リンクを開きました。「このルームに参加」を押してください。","招待あり");
