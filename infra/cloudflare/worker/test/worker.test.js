@@ -114,15 +114,15 @@ test("missing static asset binding fails explicitly without changing the observe
   assert.equal((await worker.fetch(request("/observe"))).status, 200);
 });
 
-test("iroh Wasm assets are allowlisted and relay CSP applies only to the iroh page", async () => {
+test("iroh assets are allowlisted; only iroh documents allow Wasm, all relays stay same-origin", async () => {
   const env = { ASSETS: { fetch: async req => new Response(new URL(req.url).pathname) } };
-  for (const path of ["/iroh", "/iroh.js", "/iroh-invite.js", "/iroh-wasm/browser_iroh.js", "/iroh-wasm/browser_iroh_bg.wasm"]) {
+  for (const path of ["/iroh", "/relay-lab", "/relay-lab.js", "/iroh.js", "/iroh-invite.js", "/iroh-wasm/browser_iroh.js", "/iroh-wasm/browser_iroh_bg.wasm"]) {
     const response = await worker.fetch(request(path), env);
     assert.equal(response.status, 200);
     assert.equal(await response.text(), path);
     const csp = response.headers.get("content-security-policy");
-    assert.equal(csp.includes("'wasm-unsafe-eval'"), path === "/iroh");
-    assert.equal(csp.includes("wss://aps1-1.relay.n0.iroh.link"), path === "/iroh");
+    assert.equal(csp.includes("'wasm-unsafe-eval'"), path === "/iroh" || path === "/relay-lab");
+    assert.equal(csp.includes("iroh.link"), false);
     assert.equal(csp.includes("'unsafe-eval'"), false);
     assert.equal((await worker.fetch(request(path, { method: "POST" }), env)).status, 405);
   }
@@ -142,4 +142,19 @@ test("signaling rejects cross-origin, invalid rooms and missing bindings before 
   const env={SIGNAL_ROOMS:{idFromName:name=>name,get:()=>({fetch:async()=>{forwarded=true;return new Response("upgrade");}})}};
   assert.equal((await worker.fetch(request(path,{headers:{origin:"https://observe.example.com"}}),env)).status,200);
   assert.equal(forwarded,true);
+});
+
+test("relay probe stays local; capability and origin checks guard all relay forwarding", async () => {
+  const token = `${Date.now()}-12345678-1234-4321-8321-123456789abc`;
+  const url = `/relay?room=${token}&ping=15`;
+  assert.equal((await worker.fetch(request("/ping"))).status, 200);
+  assert.equal((await worker.fetch(request("/relay"))).status, 410);
+  assert.equal((await worker.fetch(request(url))).status, 503);
+  assert.equal((await worker.fetch(request(url, { headers: { origin: "https://evil.example" } }))).status, 403);
+  assert.equal((await worker.fetch(request(url, { method: "POST" }))).status, 405);
+  const names = [];
+  const env = { IROH_RELAYS: { idFromName(name) { names.push(name); return name; }, get: () => ({ fetch: async () => new Response("relay") }) } };
+  assert.equal((await worker.fetch(request(url), env)).status, 200);
+  assert.equal((await worker.fetch(request(`/relay-stats?room=${token}`), env)).status, 200);
+  assert.deepEqual(names, [token, token]);
 });

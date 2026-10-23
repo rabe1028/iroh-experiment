@@ -3,9 +3,11 @@
 iroh Serverless NAT Traversal / Direct Media Path 実験のリポジトリ。
 詳細は `EXPERIMENT_PLAN.md` を参照。
 
-スマホのブラウザからのHTTP/3・STUN予備テストは、配置済みobserverの`/test`で実行できる。[手順](infra/cloudflare/README.md#スマホのブラウザからの予備テスト)を参照。2台のブラウザでのWebRTC端末間試験は同じobserverの`/peer`で実行できる。irohのQUIC経路の別NAT間接続はnative版で検証する。
+スマホとPCのiroh疎通は、配置済みobserverの`/iroh`で実行できる。Rust/Wasm版irohを起動し、**自前のCloudflare Durable Object relay**で64KiBを往復する。公式relayへのfallbackは行わない。`/relay-lab`はPing 15/30/60/120/300秒の330秒比較用。ブラウザ版はrelay経由のため、直接UDPの別NAT間接続はnative版で検証する。
+HTTP/3・STUNの予備観測は`/test`を使う。[手順](infra/cloudflare/README.md)を参照。
 
 予備測定の数値・制約は[2026-10-23の結果](results/2026-10-23-preflight.md)を参照。
+DO relayの疎通・330秒Ping比較は[実測report](results/2026-10-23-cloudflare-relay.md)を参照。
 
 ## 対象バージョン
 
@@ -25,7 +27,7 @@ STUN・H3のsame-socket統合まで実装済み。Cloudflare STUN 3478への単�
 | HTTP/3 observer | 同一noq Endpoint・socketでH3観測とSTUN比較。完全なaddressはirohへ登録。Worker・設定生成・zone設定補助を用意 | 通常DNSでのH3観測成功。live STUN比較はIPv4 4/5・IPv6 3/3完了し全件一致。別NAT間peer検証は未実施 |
 | Media separation | Endpoint分離・relay無効化・停止gate・合成stream・media socket上のSTUNを実装 | 実NAT・長時間・UDP遮断試験。relay byte数は未計測（null） |
 | Fly.io QAD-only | 未実装 | デプロイ定義・基準測定 |
-| Durable Object relay | 未実装 | relay protocol・Ping間隔実験 |
+| Durable Object relay | iroh-relay-v2署名認証・EndpointId routing・Hibernation API・期限付き2 identity room・Ping matrixを実装。公開DOで64KiB往復・再生成後の復帰を確認 | 修正後330秒でQUIC全5条件は再接続なし、Endpoint待機は4/5維持・1条件切断/集計timeout。長期・別端末の安定性、media ACL、請求評価は別途 |
 | 実験基盤・最終report | direct-only `nat-peer`と予備測定reportを追加 | 別NAT環境・matrix runner・最終集計 |
 
 2026-10-23にCommand Line Toolsを選択してworkspaceテストを実行し、成功。
@@ -47,6 +49,7 @@ Cloudflareの公式field一覧には`cf.edge.client_port`とQUIC RTTが掲載さ
 | `crates/cloudflare-stun/` | STUN codec・単体probe (`stun-probe`) |
 | `crates/cloudflare-h3-observer/` | same-socket HTTP/3観測・STUN比較 (`h3-probe`) |
 | `crates/media-separation/` | direct-only合成media (`media-receiver` / `media-sender`) |
+| `crates/browser-iroh/` | ブラウザ版iroh・Cloudflare DO relay試験用Wasm |
 | `infra/cloudflare/` | Cloudflare設定・最小実験手順 |
 | `schemas/experiment-result.schema.json` | 結果JSONLのスキーマ |
 | `results/raw/` | 非公開の実測データ保存先（gitignore対象） |
@@ -81,13 +84,13 @@ dialerが生成したrun idがストリーム先頭に送られ、両プロセ�
 手順は[infra/cloudflare/README.md](infra/cloudflare/README.md)に記載。
 `--compare-stun-json`で別プロセスのfileを読む場合は別socket比較となる。same-socket比較には`--stun-server`を使う。
 同じsocketで一致しても、相手peerに対するmappingの有効性やNAT越え成功は別途確認する。
-direct mediaのローカル確認は別途可能だが、Cloudflareだけでのcontrol relayはまだない。
+Cloudflare DO上のcontrol relay PoCとブラウザ版irohの疎通を確認できる。camera/mediaのrelay転送を許可する設計ではない。
 
 ## 次の作業
 
-1. CloudflareのH3観測用zoneを設定し、same-socketのSTUN/H3比較を実測する。
+1. native版の別NAT間接続を実測し、観測candidateの到達性を確認する。
 2. Fly QAD基準・NAT試験環境を整備し、direct成功率とmedia障害時の挙動を測る。
 3. mappingのrefresh・失効、network epoch追従を整備する。
-4. Durable Object relay、集計・最終reportへ進む。
+4. DO relayの再接続・長期安定性・請求metricsを評価し、最終reportへ進む。
 
 元のPR単位の計画と各項目の進捗は[実験計画 §17](EXPERIMENT_PLAN.md#17-pull-request単位の進め方)を参照。

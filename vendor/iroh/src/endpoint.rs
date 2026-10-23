@@ -82,6 +82,7 @@ use crate::{
     },
     tls::{self, DEFAULT_MAX_TLS_TICKETS, misc::RustlsTokenKey},
 };
+use n0_future::time::Duration;
 
 #[cfg(not(wasm_browser))]
 mod bind;
@@ -133,6 +134,7 @@ pub struct Builder {
     secret_key: Option<SecretKey>,
     alpn_protocols: Vec<Vec<u8>>,
     transport_config: QuicTransportConfig,
+    relay_ping_interval: Duration,
     keylog: bool,
     address_lookup: Vec<Box<dyn DynAddressLookupBuilder>>,
     address_lookup_user_data: Option<UserData>,
@@ -203,6 +205,7 @@ impl Builder {
             secret_key: Default::default(),
             alpn_protocols: Default::default(),
             transport_config: QuicTransportConfig::default(),
+            relay_ping_interval: Duration::from_secs(15),
             keylog: Default::default(),
             address_lookup: Default::default(),
             address_lookup_user_data: Default::default(),
@@ -250,6 +253,7 @@ impl Builder {
             client_config: tls_config.make_client_config(self.keylog)?,
             tls_config,
             transport_config: self.transport_config.clone(),
+            relay_ping_interval: self.relay_ping_interval,
             token_key,
             token_store: Arc::new(noq::TokenMemoryCache::default()),
         };
@@ -577,6 +581,21 @@ impl Builder {
             }
         }
         self
+    }
+
+    /// Sets the experimental relay protocol ping interval (15, 30, 60, 120 or 300 seconds).
+    ///
+    /// This leaves QUIC keepalives, ping-response deadlines and send timeouts unchanged.
+    #[cfg(feature = "unstable-relay-ping")]
+    pub fn relay_ping_interval(mut self, interval: Duration) -> Result<Self, &'static str> {
+        if ![15, 30, 60, 120, 300]
+            .into_iter()
+            .any(|s| interval == Duration::from_secs(s))
+        {
+            return Err("unsupported experimental relay ping interval");
+        }
+        self.relay_ping_interval = interval;
+        Ok(self)
     }
 
     /// Removes all Address Lookup services from the builder.

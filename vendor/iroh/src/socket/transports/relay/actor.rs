@@ -64,11 +64,8 @@ use crate::{endpoint::RelayStatus, net_report::Report, socket::Metrics as Socket
 /// How long a non-home relay connection needs to be idle (last written to) before we close it.
 const RELAY_INACTIVE_CLEANUP_TIME: Duration = Duration::from_secs(60);
 
-/// Interval in which we ping the relay server to ensure the connection is alive.
-///
-/// The default QUIC max_idle_timeout is 30s, so setting that to half this time gives some
-/// chance of recovering.
-const PING_INTERVAL: Duration = Duration::from_secs(15);
+/// Upstream timeout for sending a frame, independent of experimental ping intervals.
+const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Number of datagrams which can be sent to the relay server in one batch.
 ///
@@ -137,6 +134,7 @@ struct ActiveRelayActor {
     url: RelayUrl,
     /// Builder which can repeatedly build a relay client.
     relay_client_builder: relay::client::ClientBuilder,
+    ping_interval: Duration,
     /// Whether or not this is the home relay server.
     ///
     /// The home relay server needs to maintain it's connection to the relay server, even if
@@ -187,6 +185,7 @@ enum ActiveRelayPrioMessage {
 /// Configuration needed to start an [`ActiveRelayActor`].
 #[derive(Debug)]
 struct ActiveRelayActorOptions {
+    ping_interval: Duration,
     url: RelayUrl,
     prio_inbox_: mpsc::Receiver<ActiveRelayPrioMessage>,
     inbox: mpsc::Receiver<ActiveRelayMessage>,
@@ -259,6 +258,7 @@ enum DialError {
 impl ActiveRelayActor {
     fn new(opts: ActiveRelayActorOptions) -> Self {
         let ActiveRelayActorOptions {
+            ping_interval,
             url,
             prio_inbox_: prio_inbox,
             inbox,
@@ -277,6 +277,7 @@ impl ActiveRelayActor {
             relay_datagrams_send,
             url,
             relay_client_builder,
+            ping_interval,
             is_home_relay: false,
             inactive_timeout: Box::pin(time::sleep(RELAY_INACTIVE_CLEANUP_TIME)),
             stop_token,
@@ -531,7 +532,7 @@ impl ActiveRelayActor {
 
         // Regularly send pings so we know the connection is healthy.
         // The first ping will be sent immediately.
-        let mut ping_interval = time::interval(PING_INTERVAL);
+        let mut ping_interval = time::interval(self.ping_interval);
         ping_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let res = loop {
@@ -738,8 +739,8 @@ impl ActiveRelayActor {
         state: &mut ConnectedRelayState,
         client_stream: &mut iroh_relay::client::ClientStream,
     ) -> Result<(), RelayConnectionError> {
-        // we use the same time as for our ping interval
-        let send_timeout = PING_INTERVAL;
+        // Keep stalled-send detection unchanged when experimenting with idle pings.
+        let send_timeout = SEND_TIMEOUT;
 
         let mut timeout = pin!(time::sleep(send_timeout));
         let mut sending_fut = pin!(sending_fut);
@@ -866,6 +867,7 @@ pub(super) struct RelayActor {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
+    pub ping_interval: Duration,
     pub my_relay: HomeRelayWatch,
     pub secret_key: SecretKey,
     #[cfg(not(wasm_browser))]
@@ -1254,6 +1256,7 @@ impl RelayActor {
         let (inbox_tx, inbox_rx) = mpsc::channel(64);
         let span = info_span!("active-relay", %url);
         let opts = ActiveRelayActorOptions {
+            ping_interval: self.config.ping_interval,
             url,
             prio_inbox_: prio_inbox_rx,
             inbox: inbox_rx,
@@ -1423,6 +1426,7 @@ mod tests {
         span: tracing::Span,
     ) -> AbortOnDropHandle<()> {
         let opts = ActiveRelayActorOptions {
+            ping_interval: Duration::from_secs(15),
             url,
             prio_inbox_: prio_inbox_rx,
             inbox: inbox_rx,

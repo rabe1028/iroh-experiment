@@ -2,7 +2,9 @@
   "name": "iroh-h3-observer",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build:iroh": "node scripts/build-iroh.mjs",
     "predeploy": "npm run build:iroh",
@@ -16,5 +18,10 @@
     "deploy": "wrangler deploy --config wrangler.local.json",
     "probe": "node scripts/probe.mjs"
   },
-  "devDependencies": { "wrangler": "4.152.0" }
+  "devDependencies": {
+    "wrangler": "4.152.0"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0"
+  }
 }

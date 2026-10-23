@@ -10,7 +10,7 @@
   <section class="intro" aria-labelledby="title">
     <p class="eyebrow"><span class="signal" aria-hidden="true"></span> IROH 1.0.3 · WEBASSEMBLY</p>
     <h1 id="title">ブラウザにも、<br><em>irohを。</em></h1>
-    <p class="lead">スマホとPC、それぞれにirohを起動。<br>relayを経由して、64KiBを往復させます。</p>
+    <p class="lead">スマホとPC、それぞれにirohを起動。<br>自前のCloudflare DO relayで、64KiBを往復させます。</p>
     <div class="setup"><span class="small-index">準備</span><p>片方でリンクを作り、もう1台で開いて参加します。両方の画面を開いたままにしてください。<strong>このテストはrelay接続です。UDP直接接続・NAT越えは未検証のままです。</strong></p></div>
     <fieldset><legend>この端末の回線 <span>自己申告</span></legend><div class="choices">
       <label><input type="radio" name="network" value="cellular">モバイル回線</label><label><input type="radio" name="network" value="wifi">Wi-Fi / 有線</label><label><input type="radio" name="network" value="unspecified" checked>未指定</label>
@@ -22,15 +22,16 @@
   </section>
   <section class="observations" aria-labelledby="results-title">
     <div class="section-heading"><h2 id="results-title">irohの通信結果</h2><button id="stop" class="text-button" type="button" disabled>中止 / 切断</button></div>
-    <article><div class="test-heading"><span class="index">01</span><div><h3>QUIC / RELAY</h3><p>irohの認証・暗号化・双方向ストリーム</p></div><span class="badge" id="state-badge">待機中</span></div>
+    <article><div class="test-heading"><span class="index">01</span><div><h3>QUIC / CLOUDFLARE DO</h3><p>irohの認証・暗号化・双方向ストリーム</p></div><span class="badge" id="state-badge">待機中</span></div>
       <p id="status" class="result-line" role="status">まず片方の端末でリンクを作ってください。</p>
       <dl class="metrics"><div><dt>データ往復</dt><dd id="echo">—</dd></div><div><dt>実測した経路</dt><dd id="path">—</dd></div><div><dt>NAT越え</dt><dd>未検証</dd></div></dl>
       <dl class="address"><dt>この端末のiroh ID</dt><dd id="local-id">—</dd><dt>接続相手のiroh ID</dt><dd id="remote-id">—</dd></dl>
       <p class="detail">64KiBの全バイトを両端で検証し、通信前後のiroh選択経路を記録します。実行時間は接続・転送を含み、RTTではありません。</p>
     </article>
   </section>
-  <aside class="scope"><span class="small-index">読み方</span><div><h2>irohは動きます。直接UDPの検証は別です。</h2><p>このページのRust/Wasmがiroh Endpointを作成し、QUICをn0の公開relayまでのWebSocketに載せます。端末間の通信内容はirohが暗号化します。CloudflareはHTMLとWasmの配信を担当します。</p><p>標準のブラウザ版irohはraw UDP socketを開けません。<strong>STUNでのhole punching、same-socket STUN/H3、直接接続率は測定しません。</strong>それらは別回線の2台でnative版を使って確認します。</p></div></aside>
+  <aside class="scope"><span class="small-index">読み方</span><div><h2>irohは動きます。直接UDPの検証は別です。</h2><p>このページのRust/Wasmがiroh Endpointを作成し、QUICをこのドメイン上の自前Cloudflare Durable Object relayまでのWebSocketに載せます。端末間の通信内容はirohが暗号化します。Cloudflareが配信・relay転送を担当し、公式relayへのfallbackは行いません。</p><p>標準のブラウザ版irohはraw UDP socketを開けません。<strong>STUNでのhole punching、same-socket STUN/H3、直接接続率は測定しません。</strong>それらは別回線の2台でnative版を使って確認します。</p></div></aside>
   <section class="export"><div><h2>両方の端末で結果を保存</h2><p>iroh ID・relay経路と実行結果を含みます。<br>結果はこの画面内に保持します。</p></div><button id="download" type="button" disabled>JSONを保存 <span aria-hidden="true">↓</span></button><p id="export-status" role="status"></p></section>
   <details id="json-details" hidden><summary>JSONを表示（保存できないとき）</summary><pre id="json-output"></pre></details>
+  <p class="detail"><a href="/relay-lab">Ping間隔と接続維持を測る実験室へ →</a></p>
   <footer><a href="/test">H3 / STUNの予備測定へ</a><span>VERIFY IROH. RECORD THE RELAY.</span></footer>
 </main></body></html>

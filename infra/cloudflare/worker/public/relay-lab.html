@@ -1,0 +1,20 @@
+<!doctype html><html lang="ja"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cloudflare relay実験室 — iroh experiment</title><link rel="stylesheet" href="/browser.css"><script type="module" src="/relay-lab.js"></script>
+</head><body><main>
+<header><a class="wordmark" href="/iroh">iroh <span>/ relay lab</span></a><span class="edition">EXPERIMENT E7</span></header>
+<section class="intro"><p class="eyebrow">CLOUDFLARE DO · IROH RELAY V2</p><h1>中継の、<br><em>静かな時間。</em></h1>
+<p class="lead">Ping間隔を15・30・60・120・300秒で比較。<br>自前のDO relayで、接続と受信message数を測ります。</p>
+<div class="setup"><span class="small-index">条件</span><p>1画面内で各条件のirohを起動し、Endpointのみの待機と、64KiB往復後のQUIC接続維持を比較します。準備後330秒間、アプリデータを送らずに待ちます。<strong>別端末・NAT越えの試験ではありません。</strong>この画面を開いたままにしてください。</p></div>
+<button id="start" type="button">全10条件を測定する（約6分） <span>↗</span></button>
+<button id="stop" class="secondary" type="button" disabled>中止して接続を閉じる</button>
+<p id="lab-status" class="result-line" role="status">公式relayは使いません。1回で15個のiroh Endpoint・10個の期限付きDOルームを使います。</p>
+</section>
+<section class="observations"><div class="section-heading"><h2>330秒の観測</h2><span>QUIC keepaliveは既定値を維持</span></div>
+<div class="lab-scroll"><table class="lab-table"><thead><tr><th>条件</th><th>Ping</th><th>状態</th><th>受信</th><th>Ping / Pong</th><th>QUIC frame</th><th>再生成</th></tr></thead><tbody id="lab-rows"></tbody></table></div>
+</section>
+<aside class="scope"><span class="small-index">読み方</span><div><h2>message数と請求額を分けて記録します。</h2><p>受信はDOのWebSocket handlerで数えたmessage数、再生成はconstructor実行回数の差分です。handlerの回数を請求額やhibernation時間へ換算しません。プラットフォームの請求request数・active GB-sは別の計測が必要です。</p><p>測定中のDOへのstatus pollingは行いません。開始・終了の集計取得でのみHTTP requestが発生します。QUICのkeepaliveも受信messageに含まれるため、relay Pingだけを減らしても同じ割合で負荷が減るとは限りません。</p></div></aside>
+<section class="export"><div><h2>測定結果</h2><p>両端のecho検証とDO countersを保存します。</p></div><button id="download" type="button" disabled>JSONを保存 ↓</button></section>
+<details id="lab-json" hidden><summary>結果JSONを表示</summary><pre id="lab-output"></pre></details>
+<footer><a href="/iroh">スマホとのiroh接続テストへ</a><span>COUNT THE MESSAGES.</span></footer>
+</main></body></html>

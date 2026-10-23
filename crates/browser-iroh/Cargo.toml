@@ -8,7 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
-iroh = { version = "=1.0.3", default-features = false, features = ["tls-ring"] }
+iroh = { version = "=1.0.3", default-features = false, features = ["tls-ring", "unstable-relay-ping"] }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -97,6 +97,7 @@ tls-ring = [
 unstable-custom-transports = []
 unstable-net-report = []
 unstable-raw-udp = []
+unstable-relay-ping = []
 
 [lib]
 name = "iroh"

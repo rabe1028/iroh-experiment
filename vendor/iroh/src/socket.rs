@@ -244,6 +244,7 @@ pub(crate) struct StaticConfig {
     #[debug("Arc<dyn TokenStore>")]
     pub(crate) token_store: Arc<dyn TokenStore>,
     pub(crate) transport_config: QuicTransportConfig,
+    pub(crate) relay_ping_interval: Duration,
 }
 
 impl StaticConfig {
@@ -934,6 +935,7 @@ impl EndpointInner {
             tls_config: tls_config.clone(),
             metrics: metrics.socket.clone(),
             relay_map: relay_map.clone(),
+            ping_interval: static_config.relay_ping_interval,
         };
 
         let shutdown_state = ShutdownState::default();
@@ -2168,6 +2170,7 @@ mod tests {
             token_key: Arc::new(RustlsTokenKey::new(rng, &crypto_provider).unwrap()),
             token_store: Arc::new(noq::TokenMemoryCache::default()),
             transport_config: QuicTransportConfig::default(),
+            relay_ping_interval: Duration::from_secs(15),
         };
         let server_config = static_config.create_server_config(vec![]);
         Options {
@@ -2583,6 +2586,7 @@ mod tests {
             token_key: Arc::new(RustlsTokenKey::new(&mut rand::rng(), &crypto_provider).unwrap()),
             token_store: Arc::new(noq::TokenMemoryCache::default()),
             transport_config: QuicTransportConfig::default(),
+            relay_ping_interval: Duration::from_secs(15),
         };
         let server_config = static_config.create_server_config(vec![ALPN.to_vec()]);
 

@@ -20,7 +20,8 @@
 | Cloudflare STUN | same-socket STUN tap、並列応答分離、iroh candidate登録、3478/53指定 | 実NAT比較・mapping refresh/失効 |
 | HTTP/3 observer | 同一noq Endpoint、WebPKI、header解析、live STUN比較、完全なaddressの登録、Worker・Wrangler・zone設定補助 | 通常DNSでH3観測成功。live STUN比較はIPv4 4/5・IPv6 3/3完了し全件一致。別NAT間peer検証は未実施 |
 | Media separation | control/media Endpoint分離、media socketのSTUN、media relay無効化、candidate交換、fail-closed gate、合成stream、ローカルE2Eテスト | 実NAT、長時間、UDP blackhole試験、relay byte実測 |
-| Fly QAD / DO relay | 未実装 | infrastructure・protocol・測定 |
+| Fly QAD | 未実装 | infrastructure・基準測定 |
+| DO relay | iroh-relay-v2署名認証・routing・Hibernation API・Ping matrix PoC | 修正後330秒でQUIC 5/5維持、Endpoint待機4/5維持・1条件切断/集計timeout。長期・別端末・請求評価は未完 |
 | 実験基盤 / 最終report | 未実装 | NAT profiles、runner、匿名化・集計、公開測定結果 |
 
 - `cargo check --workspace --all-targets --locked --offline`: 成功（2026-10-23）。
@@ -899,6 +900,12 @@ HTTP/3 originはUDP forwardingが必要なため、この段階では対象外�
 
 ## E7. Cloudflare Durable Object relayとPing間隔
 
+2026-10-23にPoC実装と公開Workerでの測定を実施した。
+64KiB往復とDO再生成後のrouting復帰を確認し、Ping 5間隔×2条件を330秒観測した。
+修正後はQUIC接続あり5条件で再接続なし、Endpoint待機60秒はrelay切断と集計timeoutが残った。
+数値・失敗を含む結果は[実測report](results/2026-10-23-cloudflare-relay.md)を参照。
+以下の長期安定性・障害検出・請求評価は継続する。
+
 ### 目的
 
 WebSocket relayをcontrol planeとして運用する場合のidle costを測る。
@@ -1337,10 +1344,10 @@ development cost
 | PR 4 Same-socket STUN | same-socket tap・candidate登録を追加。ローカルとCloudflare 3478で確認 |
 | PR 5 HTTP/3 observer | same-noq EndpointのH3とlive STUN比較を追加。zone実測でSTUN/H3のIP・port一致を7回確認。別NAT間iroh接続は未検証 |
 | PR 6 Media separation | 実装・ローカルテスト取り込み済み。実NAT・長時間・UDP遮断は未検証 |
-| PR 7 Durable Object relay | 未着手 |
+| PR 7 Durable Object relay | PoC実装・公開疎通・330秒Ping matrix。長期・media ACL・請求評価は継続 |
 | PR 8 Final report | 未着手 |
 
-追加のブラウザ試験として`/test`のH3/STUN予備測定と、`/peer`のTURNなしWebRTC DataChannel試験を用意した。WebRTC signaling用DOはiroh relay protocolの実装ではなく、PR 7の完了とは扱わない。スマホからのH3/STUN観測は提供JSONで確認済み。WebRTCのローカル診断で64KiB往復を確認し、別回線実測は両端JSONで評価する。
+追加のブラウザ試験として`/test`のH3/STUN予備測定と、`/peer`のTURNなしWebRTC DataChannel試験を用意した。WebRTC signaling用DOはiroh relay protocolとは別。iroh向けは別クラス`IrohRelay`で署名認証・転送・Pingを実装し、`/iroh`と`/relay-lab`から検証する。スマホからのH3/STUN観測は提供JSONで確認済み。WebRTCのローカル診断で64KiB往復を確認し、別回線実測は両端JSONで評価する。
 
 ### PR 1: Baseline
 

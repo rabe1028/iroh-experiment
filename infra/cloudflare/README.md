@@ -195,7 +195,7 @@ cargo run --locked --bin media-sender -- <CONTROL_EP_ID> \
   --stun-server stun.cloudflare.com:3478 --stun-server stun.cloudflare.com:53
 ```
 
-mediaは別EndpointId・relay無効のまま。controlは既存iroh基盤を使い、DO relayは未実装。
+mediaは別EndpointId・relay無効のまま。native media実験のcontrolは既存iroh基盤を使う。DO relay PoCは下記のブラウザ実験から検証する。
 このオプションは観測とcandidate交換への統合であり、両側NATのhole punching成功を保証しない。
 LANまたは到達性を確認したmappingから始め、実NAT間の接続成功率・双方向のcandidate交換は別途評価する。
 
@@ -319,10 +319,10 @@ HTTPとWebRTCは別socketで、アドレス一致をsame-socket証拠に使わ�
 
 `/iroh` は Rust の `iroh = 1.0.3` を `wasm32-unknown-unknown` にコンパイルし、
 スマホとPCのブラウザ内でそれぞれ本物の `iroh::Endpoint` を起動する。
-Cloudflare Worker は静的ページ・Wasmの配信のみを担当する。
+Cloudflare Workerが静的ページ・Wasmを配信し、別クラス`IrohRelay`のDOがiroh protocol v2の転送を担当する。
 既存の `/peer` はWebRTCの別実験であり、irohの検証には使わない。
 
-標準のirohブラウザ実装は raw UDP を開かず、QUICのパケットを n0 の公開relayまでの
+標準のirohブラウザ実装は raw UDP を開かず、この実験はQUICのパケットを自前のDO relayまでの
 WebSocketで運ぶ。このページで確認するのは端末IDの認証、暗号化されたQUICストリーム、
 64KiBの内容一致、および通信前後の選択relay経路である。
 **UDP直接接続、NAT hole punching、same-socket STUN/H3を検証したことにはならない。**
@@ -343,10 +343,11 @@ WebSocketで運ぶ。このページで確認するのは端末IDの認証、暗
 4. relay準備は25秒、接続後の転送は60秒、招待全体は10分で打ち切る。
    終了後30秒でEndpointを閉じる。失敗はrelay/接続/転送の未完了であり、NAT失敗ではない。
 
-招待のEndpointId・128bitランダムcapability・期限はURL fragmentにだけ載せ、WorkerのAPIや
-Durable Objectで交換しない。DNS lookupへのID公開も行わない。capabilityごとのALPNで1回だけ
-acceptし、接続したい相手にだけリンクを渡す。relayは実験用の公開APサーバー1台に固定するため、
-その障害から一般的なiroh接続性を推定しない。
+招待のEndpointId・128bitランダムALPN capability・期限・relay room tokenはURL fragmentで相手へ渡す。
+relayへのWebSocket接続ではroom tokenをqueryに載せてDOを選ぶ。ALPN capabilityと平文payloadはrelayへ渡さない。
+DNS lookupへのID公開も行わない。capabilityごとのALPNで1回だけ
+acceptし、接続したい相手にだけリンクを渡す。relay接続先は同一originのDOのみで、公式relayへfallbackしない。
+最初の公式AP relayでの予備疎通結果は過去の測定として保持する。
 
 Wasmのビルド（生成物はgitignore、deploy前に必須）:
 
@@ -365,4 +366,55 @@ macOSのApple clangはWasmのCコードをコンパイルできない場合が�
 `AR_wasm32_unknown_unknown=/path/to/llvm/bin/llvm-ar` を `npm run build:iroh` に渡す。
 Xcode license未同意の環境では `DEVELOPER_DIR=/Library/Developer/CommandLineTools` も指定する。
 CLIとRust側wasm-bindgenのバージョンは一致が必須で、ビルドスクリプトで検証する。
-CSPのWasm実行許可とrelay接続先の許可は `/iroh` 文書だけに追加する。
+CSPのWasm実行許可は `/iroh` と `/relay-lab` 文書に限定し、relay接続先は同一originだけを許可する。
+
+### E7: 自前Cloudflare DO relayとPing比較
+
+`IrohRelay` は `iroh-relay 1.0.3` の `iroh-relay-v2` WebSocket subprotocolを実装する。
+TLS exporter認証に依存せず、16byte乱数challengeをBLAKE3のupstream domainでderiveしてEd25519署名を検証する。
+認証前の転送を拒否し、受信Datagramの宛先EndpointIdで相手を選び、送信元を認証済みIDへ置換する。
+単一Datagram・batch・Ping/Pong・EndpointGoneに対応する。未知のframeは拒否する。
+新しいbinding/migrationは既存WebRTC signaling用DOから分離する。
+
+- `/relay?room=<timestamp-UUID>&ping=15` は最大30分の秘密room tokenと署名認証が必要。
+  1 roomは生涯2 identity、upgradeは最大20回、有効な同時socketは最大4本。
+  Cloudflareがclose処理中のsocketを返しても、退役済みsocketは同時接続枠に数えない。
+- identityの再接続は古いsocketを退役させる。ルーティングとcounterはWebSocket attachmentに保持し、
+  DOの再生成後も復帰できる。閉じたsocketの累積counterはstorageへ保存する。
+- 1 connectionの上限は受信2MiB・10,000 frame・10秒512 frame。frame単体もwire protocolのサイズで制限する。
+- `ctx.acceptWebSocket()` とalarmを使い、server側setIntervalや未完了のrequestでidleを維持しない。
+  auth期限10秒・server PingへのPong期限5秒・room期限をalarmで処理する。
+- `/relay-stats` もroom tokenが必要。payloadやIPは保存せず、frame数・byte数・再接続・終了理由・constructor回数を返す。
+  完了後の集計用storageはroom失効から1時間後に削除する。
+
+`/relay-lab` は同じブラウザ内の15 Endpoint・10 roomを使い、5種類のPing間隔について
+(a) Endpointのみの待機、(b) 64KiB往復後のQUIC接続維持、を330秒間比較する。
+実際の観測時間は各条件のserver timestamp差も保存する。測定中のDO status pollingは行わず、
+開始・終了に1回ずつ取得する。ローカルのiroh healthはブラウザ内で観測し、変化時だけ記録する。
+QUIC heartbeatを5秒の既定値に保つため、relay Ping以外のmessageが残る場合も測定対象となる。
+
+ここで測るのは同じブラウザ内でのcontrol relay PoCであり、別NATのdirect接続やcamera/media ACLの証明ではない。
+再接続は成功へ丸めず、`reconnects` と `survived`、終了理由に残す。
+constructor再実行は観測できるが、hibernation durationや請求額の実測値とは区別する。
+
+プラットフォーム側のmetricsは、取得済みのJSONからobject IDと時間窓を使ってread-onlyで収集できる:
+
+```sh
+node scripts/relay-analytics.mjs \
+  --results ../../../results/raw/cloudflare-relay/ping-matrix.json \
+  --out ../../../results/raw/cloudflare-relay/platform-metrics.json
+```
+
+既存Wrangler loginまたは`CLOUDFLARE_API_TOKEN`を使う。credentialsは出力・保存しない。
+対象のWorker/class/namespaceとobjectに絞り、時刻はwhole-minute bucketへ外側に丸める。
+全条件を含む共通の時間窓で一括取得する。
+そのため準備・終了処理が同じbucketへ入る場合がある。空データ・APIエラーは0へ変換しない。
+GraphQLのraw invocation数をbilling request数と呼ばず、請求requestは未確定のまま保持する。
+`sum.duration`はCloudflareが報告するGB*sとして扱い、ブラウザやDO内のtimerから推定しない。
+adaptive samplingの`sampleInterval`も保存する。受信messageがPeriodic側で0でも、Hibernationの
+受信handlerはInvocations側へ記録されるため、未受信とは判断しない。
+
+参考: [Hibernation WebSockets](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)、
+[DO metrics](https://developers.cloudflare.com/durable-objects/observability/metrics-and-analytics/)、
+[DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/)、
+[Web Crypto](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)。
