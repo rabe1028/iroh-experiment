@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="スマホの回線からHTTP/3とSTUNを観測する、小さなネットワーク実験。">
+  <title>回線を観測する — iroh experiment</title>
+  <link rel="stylesheet" href="/browser.css">
+  <script src="/browser.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><a href="/" class="wordmark">iroh <span>/ experiment</span></a><span class="edition">FIELD NOTE 01</span></header>
+    <section class="intro" aria-labelledby="title">
+      <p class="eyebrow"><span class="signal" aria-hidden="true"></span> BROWSER NETWORK PROBE</p>
+      <h1 id="title">その回線を、<br><em>観測する。</em></h1>
+      <p class="lead">スマホからCloudflareへ。HTTP/3の接続と、<br class="wide">STUNで見えるUDPアドレスを調べます。</p>
+      <div class="setup"><span class="small-index">準備</span><p>モバイル回線で試すときは、<strong>Wi-Fiをオフ</strong>にしてください。VPNやプライベートリレーを使っている場合は、その経路を含む結果になります。</p></div>
+      <fieldset id="network"><legend>いま使っている回線 <span>自己申告</span></legend><div class="choices">
+        <label><input type="radio" name="network" value="cellular">モバイル回線</label>
+        <label><input type="radio" name="network" value="wifi">Wi-Fi</label>
+        <label><input type="radio" name="network" value="unspecified" checked>未指定</label>
+      </div></fieldset>
+      <button id="start" type="button">測定をはじめる <span aria-hidden="true">↗</span></button>
+      <p class="micro">カメラ・マイクの許可は不要です。約10〜40秒。</p>
+      <noscript><p>測定にはJavaScriptを有効にしてください。</p></noscript>
+    </section>
+    <section class="observations" aria-labelledby="results-title">
+      <div class="section-heading"><h2 id="results-title">観測結果</h2><span id="run-time">まだ測定していません</span></div>
+      <article>
+        <div class="test-heading"><span class="index">01</span><div><h3>HTTP/3</h3><p>ブラウザ → Cloudflare</p></div><span class="badge" id="h3-badge">待機中</span></div>
+        <p class="result-line" id="h3-status" role="status">HTTPSで5回アクセスし、実際の接続方式を確認します。</p>
+        <dl class="metrics"><div><dt>接続方式</dt><dd id="protocol">—</dd></div><div><dt>接続元port</dt><dd id="port">—</dd></div><div><dt>Cloudflare拠点</dt><dd id="colo">—</dd></div></dl>
+        <dl class="address"><dt>Cloudflareから見えたIP</dt><dd id="ip">—</dd></dl>
+        <p class="detail" id="h3-detail">接続方式はブラウザが選びます。HTTP/2になっても、UDP遮断とは判定できません。</p>
+        <ol id="attempts" class="attempts" aria-label="HTTP観測の各試行"></ol>
+      </article>
+      <article>
+        <div class="test-heading"><span class="index">02</span><div><h3>STUN / UDP</h3><p>WebRTC → Cloudflare STUN</p></div><span class="badge" id="stun-badge">待機中</span></div>
+        <p class="result-line" id="stun-status" role="status">WebRTCのICE収集で、外部UDPアドレスを探します。</p>
+        <ul id="candidates" class="candidates" aria-label="STUNで観測した外部UDP候補"></ul>
+        <p class="detail" id="stun-detail">カメラ・マイクは使いません。Safari等の制限で候補が表示されない場合もあります。</p>
+      </article>
+    </section>
+    <aside class="scope"><span class="small-index">読み方</span><div><h2>ここで分かること、次に試すこと。</h2><p>このページで確認できるのは、HTTP/3接続とSTUNのアドレス観測です。<strong>相手端末とのNAT越え・iroh接続はまだ試していません。</strong></p><p>ブラウザのHTTP接続とWebRTCは別socketです。IP・portが一致しても、same-socketの証拠にはなりません。irohの実験には、別回線のPCでnative版を実行します。</p></div></aside>
+    <section class="export"><div><h2>結果を持ち帰る</h2><p>結果はこのページのメモリ内だけに保持します。<br>JSONにはIPアドレスを含むため、公開時は取り除いてください。</p></div><button id="download" type="button" disabled>JSONを保存 <span aria-hidden="true">↓</span></button><p id="export-status" role="status"></p></section>
+    <details id="json-details" hidden><summary>JSONを表示（保存できないとき）</summary><pre id="json-output"></pre></details>
+    <footer><span>iroh-experiment</span><span>OBSERVE FIRST. VERIFY THE PATH.</span></footer>
+  </main>
+</body>
+</html>
