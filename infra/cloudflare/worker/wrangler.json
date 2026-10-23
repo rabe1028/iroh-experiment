@@ -12,5 +12,21 @@
     "directory": "./public",
     "binding": "ASSETS",
     "run_worker_first": true
-  }
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SIGNAL_ROOMS",
+        "class_name": "SignalingRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-signaling",
+      "new_sqlite_classes": [
+        "SignalingRoom"
+      ]
+    }
+  ]
 }

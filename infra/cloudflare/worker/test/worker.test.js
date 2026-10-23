@@ -92,7 +92,7 @@ test("mobile page and its assets are served without requiring observation header
       headers: { "content-type": "text/html; charset=utf-8" },
     });
   } } };
-  for (const path of ["/", "/test", "/browser.js", "/browser.css"]) {
+  for (const path of ["/", "/test", "/browser.js", "/browser.css", "/peer", "/peer.js", "/peer-proof.js"]) {
     const response = await worker.fetch(new Request("https://observe.example.com" + path), env);
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "asset");
@@ -104,7 +104,7 @@ test("mobile page and its assets are served without requiring observation header
     assert.equal(post.status, 405);
     assert.equal(post.headers.get("allow"), "GET, HEAD");
   }
-  assert.deepEqual(paths, ["/", "/", "/browser.js", "/browser.css"]);
+  assert.deepEqual(paths, ["/", "/", "/browser.js", "/browser.css", "/peer", "/peer.js", "/peer-proof.js"]);
   const head = await worker.fetch(request("/test", { method: "HEAD" }), env);
   assert.equal(await head.text(), "");
 });
@@ -112,4 +112,16 @@ test("mobile page and its assets are served without requiring observation header
 test("missing static asset binding fails explicitly without changing the observer", async () => {
   assert.equal((await worker.fetch(request("/test"))).status, 503);
   assert.equal((await worker.fetch(request("/observe"))).status, 200);
+});
+
+test("signaling rejects cross-origin, invalid rooms and missing bindings before forwarding", async()=>{
+  const path="/signal/"+Date.now()+"-12345678-1234-4321-8321-123456789abc";
+  assert.equal((await worker.fetch(request(path))).status,403);
+  assert.equal((await worker.fetch(request(path,{headers:{origin:"https://evil.example"}}))).status,403);
+  assert.equal((await worker.fetch(request("/signal/invalid",{headers:{origin:"https://observe.example.com"}}))).status,410);
+  assert.equal((await worker.fetch(request(path,{headers:{origin:"https://observe.example.com"}}))).status,503);
+  let forwarded=false;
+  const env={SIGNAL_ROOMS:{idFromName:name=>name,get:()=>({fetch:async()=>{forwarded=true;return new Response("upgrade");}})}};
+  assert.equal((await worker.fetch(request(path,{headers:{origin:"https://observe.example.com"}}),env)).status,200);
+  assert.equal(forwarded,true);
 });
