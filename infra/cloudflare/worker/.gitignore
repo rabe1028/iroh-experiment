@@ -2,3 +2,4 @@ node_modules/
 .wrangler/
 *.local.json
 .dev.vars*
+public/iroh-wasm/

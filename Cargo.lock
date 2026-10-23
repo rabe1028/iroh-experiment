@@ -261,6 +261,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-iroh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iroh",
+ "n0-future",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

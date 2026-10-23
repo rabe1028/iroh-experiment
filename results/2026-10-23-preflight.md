@@ -65,3 +65,27 @@ H3とSTUNの外部IPは一致しportは異なったが、別socketのためNAT�
 別途`/peer`に、TURNなしのWebRTC端末間試験を追加した。
 ローカル2タブの診断では64KiB往復を両側で確認し、NAT越え成功とは数えていない。
 自宅PCとモバイル回線スマホの本測定は、両端の結果JSONを揃えて評価する。
+
+## Browser内のiroh: relay検証
+
+ブラウザからirohを検証できるかを公式browser-echo例と、固定したiroh 1.0.3実装で調査した。
+標準Wasm版はQUICをWebSocket relayに載せる。raw UDP socketを開けず、nativeのhole punchingや
+same-socket STUN/H3をこの経路で検証することはできない。
+
+`/iroh` にRust/Wasm Endpoint同士の専用テストを追加。Cloudflareは静的ファイルの配信だけを担当し、
+EndpointIdと部屋ごとのランダムALPN capabilityは招待URLのfragmentで渡す。
+従来の `/peer` のWebRTC成功はirohの検証結果に含めない。
+
+- 同じPCの2ブラウザタブで実際のn0公開relayを使い、64KiBのecho・全バイト一致を両端で確認。
+- 両端の通信前後の選択経路はrelay、IP pathなし。
+- JSONは `engine=iroh-wasm`、`iroh_version=1.0.3`、`nat_traversal_tested=false`、
+  `nat_traversal_success=null`、`same_socket_stun_h3_tested=false`。
+- これはブラウザ版irohのrelay疎通確認。別端末・別NATの実験結果ではない。
+- 別NATでのnative直接UDP実験、およびiPhoneでのこのWasmページの実行結果は引き続き未取得。
+
+raw結果: `results/raw/browser-iroh/local-listen.json`、`local-dial.json`（非公開）。
+
+公開済みWorkerでも同じPCの2タブで64KiB往復を再確認した。両端とも通信前後の選択経路は
+relayのみ、全バイト一致、ブラウザの警告・エラーログなし。配信中JS/WasmのSHA256は
+ローカルの生成物と一致。raw結果: `results/raw/browser-iroh/public-listen.json`、
+`public-dial.json`。実機Safariからの結果はまだない。

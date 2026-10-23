@@ -8,6 +8,7 @@ members = [
     "crates/cloudflare-stun",
     "crates/media-separation",
     "crates/cloudflare-h3-observer",
+    "crates/browser-iroh",
 ]
 
 [workspace.package]

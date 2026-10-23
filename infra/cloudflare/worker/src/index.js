@@ -1,7 +1,8 @@
 import { roomExpiry } from "./signal-room.js";
 export { SignalingRoom } from "./signal-room.js";
 
-const browserPaths = new Set(["/", "/test", "/browser.js", "/browser.css", "/peer", "/peer.js", "/peer-proof.js"]);
+const browserPaths = new Set(["/", "/test", "/browser.js", "/browser.css", "/peer", "/peer.js", "/peer-proof.js",
+  "/iroh", "/iroh.js", "/iroh-invite.js", "/iroh-wasm/browser_iroh.js", "/iroh-wasm/browser_iroh_bg.wasm"]);
 function jsonReply(request, status, body, extra = {}) {
   return new Response(request.method === "HEAD" ? null : JSON.stringify(body), {
     status, headers: { "content-type": "application/json; charset=utf-8",
@@ -26,7 +27,8 @@ async function browserAsset(request, env, path) {
   response.headers.set("x-content-type-options", "nosniff");
   response.headers.set("referrer-policy", "no-referrer");
   response.headers.set("permissions-policy", "camera=(), microphone=(), geolocation=()");
-  response.headers.set("content-security-policy", `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self' ${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+  const irohPage = path === "/iroh";
+  response.headers.set("content-security-policy", `default-src 'none'; script-src 'self'${irohPage ? " 'wasm-unsafe-eval'" : ""}; style-src 'self'; connect-src 'self' ${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}${irohPage ? " https://aps1-1.relay.n0.iroh.link wss://aps1-1.relay.n0.iroh.link" : ""}; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
   return response;
 }
 
