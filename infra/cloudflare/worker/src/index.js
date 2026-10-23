@@ -1,8 +1,10 @@
 import { roomExpiry } from "./signal-room.js";
+import { relayRoom } from "./relay-protocol.js";
 export { SignalingRoom } from "./signal-room.js";
+export { IrohRelay } from "./iroh-relay.js";
 
 const browserPaths = new Set(["/", "/test", "/browser.js", "/browser.css", "/peer", "/peer.js", "/peer-proof.js",
-  "/iroh", "/iroh.js", "/iroh-invite.js", "/iroh-wasm/browser_iroh.js", "/iroh-wasm/browser_iroh_bg.wasm"]);
+  "/iroh", "/iroh.js", "/iroh-invite.js", "/iroh-wasm/browser_iroh.js", "/iroh-wasm/browser_iroh_bg.wasm", "/relay-lab", "/relay-lab.js"]);
 function jsonReply(request, status, body, extra = {}) {
   return new Response(request.method === "HEAD" ? null : JSON.stringify(body), {
     status, headers: { "content-type": "application/json; charset=utf-8",
@@ -16,6 +18,21 @@ function signaling(request, env, path) {
   if (!env.SIGNAL_ROOMS) return jsonReply(request, 503, { error: "signaling unavailable" });
   return env.SIGNAL_ROOMS.get(env.SIGNAL_ROOMS.idFromName(path.slice(8))).fetch(request);
 }
+function irohRelay(request, env) {
+  const url = new URL(request.url), origin = request.headers.get("origin");
+  if (origin && origin !== url.origin) return jsonReply(request, 403, { error: "same origin required" });
+  if (request.method !== "GET") return jsonReply(request, 405, { error: "GET required" }, { allow: "GET" });
+  const room = relayRoom(url, Date.now(), url.pathname === "/relay-stats");
+  if (!room) return jsonReply(request, 410, { error: "relay room expired or invalid" });
+  if (!env.IROH_RELAYS) return jsonReply(request, 503, { error: "iroh relay unavailable" });
+  return env.IROH_RELAYS.get(env.IROH_RELAYS.idFromName(room.token)).fetch(request);
+}
+function infrastructureRoute(request, env, path) {
+  if (path === "/relay" || path === "/relay-stats") return irohRelay(request, env);
+  if (path === "/ping" && ["GET", "HEAD"].includes(request.method)) return new Response(null, { status: 200, headers: { "cache-control": "no-store" } });
+  if (path.startsWith("/signal/")) return signaling(request, env, path);
+  return null;
+}
 async function browserAsset(request, env, path) {
   if (!env.ASSETS) return jsonReply(request, 503, { error: "browser assets unavailable" });
   const url = new URL(request.url);
@@ -27,8 +44,8 @@ async function browserAsset(request, env, path) {
   response.headers.set("x-content-type-options", "nosniff");
   response.headers.set("referrer-policy", "no-referrer");
   response.headers.set("permissions-policy", "camera=(), microphone=(), geolocation=()");
-  const irohPage = path === "/iroh";
-  response.headers.set("content-security-policy", `default-src 'none'; script-src 'self'${irohPage ? " 'wasm-unsafe-eval'" : ""}; style-src 'self'; connect-src 'self' ${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}${irohPage ? " https://aps1-1.relay.n0.iroh.link wss://aps1-1.relay.n0.iroh.link" : ""}; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
+  const irohPage = path === "/iroh" || path === "/relay-lab";
+  response.headers.set("content-security-policy", `default-src 'none'; script-src 'self'${irohPage ? " 'wasm-unsafe-eval'" : ""}; style-src 'self'; connect-src 'self' ${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`);
   return response;
 }
 
@@ -36,7 +53,8 @@ async function browserAsset(request, env, path) {
 export default {
   async fetch(request, env = {}) {
     const path = new URL(request.url).pathname;
-    if (path.startsWith("/signal/")) return signaling(request, env, path);
+    const infrastructure = infrastructureRoute(request, env, path);
+    if (infrastructure) return infrastructure;
     if (path !== "/observe" && !browserPaths.has(path)) return jsonReply(request, 404, { error: "not found" });
     if (!["GET", "HEAD"].includes(request.method)) return jsonReply(request, 405, { error: "method not allowed" }, { allow: "GET, HEAD" });
     if (browserPaths.has(path)) return browserAsset(request, env, path);

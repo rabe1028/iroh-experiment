@@ -1,4 +1,4 @@
-import { ROOM_MS, readInvitation, invitationLink } from "/iroh-invite.js";
+import { ROOM_MS, readInvitation, invitationLink, relayAddress } from "/iroh-invite.js";
 
 const $ = id => document.getElementById(id);
 let node, report, active = false, generation = 0, expiryTimer, wasm;
@@ -50,18 +50,21 @@ async function start(join) {
     if (join && !invite) throw new Error("招待リンクがありません。");
     const cap = invite?.cap ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), v => v.toString(16).padStart(2, "0")).join("");
     const expires = invite?.expires ?? Date.now() + ROOM_MS;
+    const room = invite?.room ?? `${Date.now()}-${crypto.randomUUID()}`;
+    const ping = invite?.ping ?? 15;
+    report.relay_implementation = "cloudflare-durable-object"; report.relay_ping_seconds = ping;
     expiryTimer = setTimeout(() => { if (run === generation) void stop("リンクの有効期限になりました。新しいリンクで再実行してください。"); }, expires - Date.now());
     state("Wasmを読み込み、irohをrelayに接続しています…");
     wasm ??= import("/iroh-wasm/browser_iroh.js").then(async module => { await module.default(); return module; }).catch(error => { wasm = undefined; throw error; });
     const module = await wasm;
     if (run !== generation) return;
-    const created = await module.BrowserNode.start(cap);
+    const created = await module.BrowserNode.start(cap, relayAddress(location.href, room, ping), ping);
     if (run !== generation) { await created.close(); return; }
     node = created;
     $("local-id").textContent = node.endpoint_id();
     report.endpoint_id = node.endpoint_id();
     if (!join) {
-      $("room-link").value = invitationLink(location.href, { id: node.endpoint_id(), cap, expires });
+      $("room-link").value = invitationLink(location.href, { id: node.endpoint_id(), cap, expires, room, ping });
       $("invitation").hidden = false; $("copy-status").textContent = "もう1台が参加するまで、この画面を開いたままにしてください。";
     }
     state(join ? "相手のiroh IDを認証し、64KiBを往復させています…" : "iroh起動済み。もう1台でリンクを開いて参加してください。");
@@ -71,9 +74,9 @@ async function start(join) {
     report.measurement = measurement; report.iroh_peer_tested = true;
     report.echo_success = measurement.echo_success; report.finished_at = new Date().toISOString();
     $("remote-id").textContent = measurement.remote_id;
-    $("echo").textContent = "64 KiB ✓"; $("path").textContent = "relay";
+    $("echo").textContent = "64 KiB ✓"; $("path").textContent = "Cloudflare DO";
     showReport(); clearTimeout(expiryTimer);
-    state("irohで64KiBの往復・内容一致を確認しました。経路はrelayです。NAT越えは未検証です。", "往復成功", "good");
+    state("Cloudflare DO relay経由のirohで64KiBの往復・内容一致を確認しました。NAT越えは未検証です。", "往復成功", "good");
     // Leave the endpoint alive briefly so the peer can finish consuming its ACK.
     expiryTimer = setTimeout(() => { if (run === generation) void stop("測定済みのiroh接続を閉じました。結果は保存できます。"); }, 30_000);
   } catch (error) {

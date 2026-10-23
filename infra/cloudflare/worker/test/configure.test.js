@@ -25,8 +25,8 @@ test("configuration uses a custom domain and scopes both rules to that host's ex
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
   assert.deepEqual(config.assets, { directory: "./public", binding: "ASSETS", run_worker_first: true });
-  assert.deepEqual(config.durable_objects.bindings, [{ name: "SIGNAL_ROOMS", class_name: "SignalingRoom" }]);
-  assert.deepEqual(config.migrations, [{ tag: "v1-signaling", new_sqlite_classes: ["SignalingRoom"] }]);
+  assert.deepEqual(config.durable_objects.bindings, [{ name: "SIGNAL_ROOMS", class_name: "SignalingRoom" }, { name: "IROH_RELAYS", class_name: "IrohRelay" }]);
+  assert.deepEqual(config.migrations, [{ tag: "v1-signaling", new_sqlite_classes: ["SignalingRoom"] }, { tag: "v2-iroh-relay", new_sqlite_classes: ["IrohRelay"] }]);
   const plan = JSON.parse(await readFile(`${dir}/zone-plan.local.json`));
   assert.deepEqual(plan.rules.map(r => r.phase), ["http_response_headers_transform", "http_request_cache_settings"]);
   for (const entry of plan.rules) {

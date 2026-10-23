@@ -65,3 +65,12 @@ Mapping refresh, expiry and automatic network-epoch tracking remain application 
 Same-socket equality does not prove peer connectivity through destination-dependent NATs.
 
 Validation lives in the application crates: STUN response correlation/concurrency and live iroh transfer, IPv4/IPv6 H3 with a test CA, TLS hostname rejection, CLI defaults, external-address registration, and relay-disabled media discovery.
+
+## Experimental relay ping interval
+
+`Builder::relay_ping_interval()` is a separate opt-in API gated by `unstable-relay-ping`,
+available to native and browser endpoints. It accepts exactly 15/30/60/120/300 seconds.
+The regular default remains 15 seconds. Only the relay actor's periodic ping timer changes;
+QUIC heartbeat (5 seconds), relay pong deadlines, and stalled-send timeout remain upstream defaults.
+The Cloudflare DO server independently uses the same selected interval for its own binary relay pings.
+The patch is [patches/iroh-relay-ping.patch](patches/iroh-relay-ping.patch).

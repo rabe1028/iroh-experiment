@@ -18,6 +18,10 @@
       {
         "name": "SIGNAL_ROOMS",
         "class_name": "SignalingRoom"
+      },
+      {
+        "name": "IROH_RELAYS",
+        "class_name": "IrohRelay"
       }
     ]
   },
@@ -26,6 +30,12 @@
       "tag": "v1-signaling",
       "new_sqlite_classes": [
         "SignalingRoom"
+      ]
+    },
+    {
+      "tag": "v2-iroh-relay",
+      "new_sqlite_classes": [
+        "IrohRelay"
       ]
     }
   ]
