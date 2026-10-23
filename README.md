@@ -10,7 +10,7 @@ iroh Serverless NAT Traversal / Direct Media Path 実験のリポジトリ。
 
 ## 現在の進捗（2026-10-23）
 
-STUN・H3のsame-socket統合まで実装済み。Cloudflare STUN 3478への単発観測を確認し、実NAT越えの比較測定はこれから。
+STUN・H3のsame-socket統合まで実装済み。Cloudflare STUN 3478への単発観測を確認し、Cloudflare H3でのIP・port観測とcandidate登録も確認。実NAT越えの比較測定はこれから。
 以下はコードの実装状況であり、実環境での合格を示すものではない。
 
 | 項目 | 状況 | 残作業・制約 |
@@ -18,7 +18,7 @@ STUN・H3のsame-socket統合まで実装済み。Cloudflare STUN 3478への単�
 | E0 Baseline | echo・path telemetry・JSONL出力を実装 | 実ネットワーク測定 |
 | Raw TCP tunnel | service routing・EndpointId認可・互換性テストを実装 | short-lived capabilityは未実装 |
 | Cloudflare STUN | 同一UDP socketで観測・応答分離・external address登録を実装 | 3478の実測成功。53は今回の短い試行で未成功。実NAT比較は未実施 |
-| HTTP/3 observer | 同一noq Endpoint・socketでH3観測とSTUN比較。完全なaddressはirohへ登録 | Cloudflare zone設定と実測は未確認 |
+| HTTP/3 observer | 同一noq Endpoint・socketでH3観測とSTUN比較。完全なaddressはirohへ登録。Worker・設定生成・zone設定補助を用意 | 実zone配置・H3単独probe成功（edge IP明示）。通常DNS・STUN比較・実NATは継続評価 |
 | Media separation | Endpoint分離・relay無効化・停止gate・合成stream・media socket上のSTUNを実装 | 実NAT・長時間・UDP遮断試験。relay byte数は未計測（null） |
 | Fly.io QAD-only | 未実装 | デプロイ定義・基準測定 |
 | Durable Object relay | 未実装 | relay protocol・Ping間隔実験 |

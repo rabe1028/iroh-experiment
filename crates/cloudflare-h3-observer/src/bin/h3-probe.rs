@@ -4,7 +4,10 @@
 //! Prints the JSON observation; optionally compares against a STUN probe
 //! result file and prints the plan E3 comparison verdict.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -39,6 +42,9 @@ struct Args {
     /// Bind one IP socket for both STUN and H3 (IPv4 by default).
     #[arg(long, default_value = "0.0.0.0:0")]
     bind: SocketAddr,
+    /// Explicit edge IP for DNS diagnostics; SNI and WebPKI still use host.
+    #[arg(long)]
+    resolve: Option<IpAddr>,
 }
 
 fn main() -> Result<()> {
@@ -135,14 +141,25 @@ async fn run_on_endpoint(
         return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no STUN observation")))
             .context("same-socket STUN failed");
     }
-    let obs = cloudflare_h3_observer::observe_on_endpoint(
-        endpoint,
-        &args.host,
-        &args.path,
-        args.port,
-        Duration::from_secs(args.timeout_secs),
-    )
-    .await
+    let timeout = Duration::from_secs(args.timeout_secs);
+    let obs = match args.resolve {
+        Some(ip) => {
+            cloudflare_h3_observer::observe_on_endpoint_at(
+                endpoint,
+                SocketAddr::new(ip, args.port),
+                &args.host,
+                &args.path,
+                timeout,
+            )
+            .await
+        }
+        None => {
+            cloudflare_h3_observer::observe_on_endpoint(
+                endpoint, &args.host, &args.path, args.port, timeout,
+            )
+            .await
+        }
+    }
     .context("H3 observation failed")?;
 
     let mut comparison = None;

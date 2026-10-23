@@ -8,7 +8,9 @@ STUNとH3はirohの同じUDP socketから観測できる。Fly QADやDurable Obj
 
 - ローカルでSTUN・H3・iroh接続の実際の送信元port一致、IPv4/IPv6、並列STUN、TLS名前検証、終了時キャンセル、candidate登録を確認。
 - Cloudflare STUN 3478のsame-socket観測とcandidate登録に成功。53は1秒・1回の試行で未成功（遮断の断定はしない）。
-- CloudflareのH3 zone設定・実測、実NAT間でのdirect成功率比較は未実施。
+- Cloudflareの実zoneへWorkerを配置し、port返却Transform RuleとCache bypassを有効化。既存のHTTP/3有効設定を確認。
+- 公開DNSで解決したedge IPを明示したH3単独probeに成功。同じiroh socketでIP・portを観測しcandidate登録を確認。実NAT間のdirect接続は未検証。
+- このMacの通常DNSは新hostnameを未解決。今回のSTUN再試行はtimeout。初回の3478成功とは別runとして記録。
 - アカウントID・実domain・token・生の観測結果はcommitしない。rawは`results/raw/`へ保存。
 
 ## 仕様確認と訂正
@@ -59,41 +61,77 @@ CLI終了時にはEndpointを閉じるため、出力addressを別プロセス�
 診断用に`--standalone`を指定すると別UDP socketを使い、`same_socket_as_iroh: false`となる。
 別々の`stun-probe`プロセスもsocketを共有しない。
 
-## 2. H3でIPとRTTを取得する最小Worker
+## 2. 観測Workerの準備・デプロイ
 
-proxed hostnameの`/observe*`へ次のWorkerを設定し、zoneのHTTP/3を有効にする。
-この例はTransform RuleなしでIP・任意のRTT・coloを返す。portは欠測となる。
-コードは設定用サンプルであり、デプロイ済みのresourceではない。
+`worker/`にデプロイ可能なWorkerとWranglerの固定依存を用意した。Node.js 22以上を使う。
+実験専用の未使用サブドメインを選ぶ。既存サイトのhostnameは使わない。
+Workerは`GET /observe`と`HEAD /observe`だけを受け付け、IP・任意のQUIC RTT・colo・HTTP versionをheaderに返す。
+portは次節のTransform Ruleで付ける。clientはJSON bodyではなくresponse headerを読む。
 
-```js
-export default {
-  async fetch(request) {
-    const cf = request.cf ?? {};
-    const ip = request.headers.get("cf-connecting-ip") ?? "";
-    return new Response(JSON.stringify({
-      observed_ip: ip,
-      observed_port: null,
-      rtt_ms: cf.clientQuicRtt ?? null,
-      http_protocol: cf.httpProtocol ?? "",
-    }), {
-      headers: {
-        "content-type": "application/json",
-        "cache-control": "no-store",
-        "x-observed-ip": ip,
-        "x-observed-rtt-ms": String(cf.clientQuicRtt ?? ""),
-        "x-observed-colo": cf.colo ?? "",
-      },
-    });
-  },
-};
+```sh
+cd infra/cloudflare/worker
+npm ci
+npm test
+npm run check                 # 認証不要のデプロイdry-run
+npm run login                 # ブラウザでCloudflareの認証・許可
+npm run whoami
+npm run configure -- --hostname observe.example.invalid \
+  --account-id <ACCOUNT_ID> --zone-id <ZONE_ID>
+npm run deploy
 ```
 
-`/observe*`はCache Ruleでもbypassにする。clientはJSON bodyを解析せず、response headerを読む。
-この例のport欠測と、Cloudflareプラットフォーム全体でportが取得不可能という主張を混同しない。
+`configure`は`wrangler.local.json`と`zone-plan.local.json`を生成するだけで、remote変更は行わない。
+実domain・IDを含む両file、Wrangler作業用file、依存はGit対象外。
+Workerは[Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)で配置し、DNSと証明書はCloudflareが管理する。
+`workers.dev`・preview URLは無効。Worker内の永続logging・storage・外部fetchは使わない。
+HTTP/3の有効化はzone全体の設定。以下のruleはhostnameと`/observe`に限定する。
+
+```sh
+npm run setup-zone            # ローカルのplanを表示。remote変更なし
+```
+
+通常のWrangler OAuthログインは、zoneのTransform/Cache/HTTP3設定の編集権限を含まない。
+Dashboardで次節のruleとCache bypass、HTTP/3を設定するか、対象zoneに限定したAPI tokenで自動設定する。
+必要な権限はZone Read、Zone Settings Edit、Zone Transform Rules Edit、Cache Settings Edit。
+tokenはチャットや引数に貼らず、ローカル環境変数`CLOUDFLARE_API_TOKEN`に設定する。
+
+```sh
+npm run setup-zone -- --apply
+```
+
+自動設定はzoneの所属・既存phaseを先に確認し、HTTP/3をonにする。
+既存ruleset全体の置換はせず、hostname由来の`ref`で自分のruleだけを追加・更新する。
+Dashboard作成ruleも同名・同条件・同actionなら引き継ぎ、`ref`を付けて更新する。
+初回の設定前snapshotは`zone-<ZONE_ID>-before.local.json`へ保存し、再実行時も上書きしない。
+APIエラー時は途中まで設定済みの場合がある。Dashboardで確認・修正後に再実行できる。
+Free planを含む対象zoneで式が受理されるかは、実際のAPI応答・H3測定で確認する。
+
+認証後のlive smoke testはrepo rootからのcargoコマンド（第4節）か、次のwrapperで実行する。
+
+```sh
+# このMacでCommand Line Toolsを使う場合
+export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+npm run probe -- --network-profile R1
+# STUNに依存せずH3の配置だけを確認
+npm run probe -- --h3-only --network-profile setup-h3-only
+# IPv6を別runとして測る場合
+npm run probe -- --network-profile R1-v6 --bind '[::]:0'
+```
+
+wrapperは毎回`results/raw/h3-<UTC時刻>/`にコマンド・結果・console・stderrを保存する。
+通常DNSの反映待ちなどを切り分ける場合は、確認したedge IPを`--resolve <EDGE_IP>`で指定できる。
+接続先IPだけを固定し、元hostnameによるSNI・WebPKI・HTTP authority検証は維持する。自動DoH fallbackはしない。
+`run.json`のコマンドに指定IPを記録し、通常DNSを使うrunとは区別する。
+`summary.json`でH3成功・port取得・candidate登録を確認する。port欠測のH3成功とpeer NAT越え成功を混同しない。
+ローカル開発の`npm run dev`はHTTP動作の確認用で、Cloudflare edgeのH3/port観測の実証にはならない。
+デプロイ・zone設定が済んだだけでも実測成功とは扱わない。
+
+撤去時は実験用Custom DomainとWorker、planに記載された`ref`のTransform/Cache ruleを削除する。
+HTTP/3はzone全体の設定なので、snapshotを参照し、その後の他用途も確認して必要な場合だけ元に戻す。
 
 ## 3. 任意: Transform Ruleでportも返す
 
-Worker例または静的な2xx応答を用意した同じproxed hostnameに、Response Header Transform Ruleを追加する。
+Workerまたは静的な2xx応答を用意した同じproxied hostnameに、Response Header Transform Ruleを追加する。
 既存ruleは維持し、実験用のruleを追加する。条件は実際のhostnameと`/observe`に限定する。
 [作成手順](https://developers.cloudflare.com/rules/transform/response-header-modification/create-dashboard/)のSet dynamicで次を設定する。
 
@@ -105,7 +143,7 @@ Worker例または静的な2xx応答を用意した同じproxed hostnameに、Re
 | `x-observed-rtt-ms` | `to_string(cf.timings.client_quic_rtt_msec)` |
 | `x-observed-http-version` | `http.request.version` |
 
-[Transform Rules](https://developers.cloudflare.com/rules/transform/)はFreeを含む各planで利用でき、proxed DNSが前提。
+[Transform Rules](https://developers.cloudflare.com/rules/transform/)はFreeを含む各planで利用でき、proxied DNSが前提。
 対象zoneで式が受理されるか、H3応答にportが付くかを確認する。APIを使う場合のphase名は`http_response_headers_transform`。
 response headerだけの`cache-control`変更はCloudflare cache動作を変えないため、Cache Ruleのbypassも設定する。
 
@@ -129,7 +167,7 @@ cargo run --locked -p cloudflare-h3-observer --bin h3-probe -- \
 `--stun-server`は指定順のfallbackで、最初の成功を比較基準にする。
 stdoutの`STUN_OBSERVATION`と`OBSERVATION`の`local_addr`が一致することをclient側でも検証する。
 `OBSERVATION`の`same_socket_as_iroh`はtrue。IPとportが取得できれば`candidate_registered`もtrueになる。
-Worker単体例ではportが欠測となり、H3 addressの登録は行わない。
+Transform RuleなしのWorker単体ではportが欠測となり、H3 addressの登録は行わない。
 
 `COMPARISON`は`same-ip-port-missing`、`same-ip-same-port`、`same-ip-different-port`、`different-ip`のいずれか。
 共通schemaの`h3.jsonl`は比較の有無、IP/port一致、same-socket、probe全体時間、失敗理由を記録する。
@@ -164,6 +202,7 @@ LANまたは到達性を確認したmappingから始め、実NAT間の接続成�
 
 - STUN: `cloudflare_stun::probe::discover(&endpoint, server_addr, &config)`、またはhostnameを受ける`discover_server`。
 - H3: `cloudflare_h3_observer::observe_on_endpoint(&endpoint, host, path, port, timeout)`。
+- H3の明示IP診断: `observe_on_endpoint_at(&endpoint, addr, host, path, timeout)`。公開CAによる元hostnameの検証を維持する。
 - 同一Endpointを渡す。別readerの起動や`SO_REUSEPORT`による別socketのbindは行わない。
 - STUNは送信元・transactionを検証し、boundedな受信channelのoverflowは観測失敗として扱う。
 - 登録addressのnetwork変更時のrefresh・失効は自動化していない。呼び出し側で再観測し、古い値は`remove_external_addr`する。

@@ -18,7 +18,7 @@
 | Baseline | echo、path telemetry、共通JSONL schema v2 | 実ネットワーク測定 |
 | Raw TCP tunnel | service routing、EndpointIdごとの認可、HTTP/TLS/H2/WebSocket/SSE/gRPCのテスト | short-lived capability |
 | Cloudflare STUN | same-socket STUN tap、並列応答分離、iroh candidate登録、3478/53指定 | 実NAT比較・mapping refresh/失効 |
-| HTTP/3 observer | 同一noq Endpoint、WebPKI、header解析、live STUN比較、完全なaddressの登録 | Cloudflare zone設定・実測 |
+| HTTP/3 observer | 同一noq Endpoint、WebPKI、header解析、live STUN比較、完全なaddressの登録、Worker・Wrangler・zone設定補助 | 実zoneでH3単独probe成功（edge IP明示）。STUN比較・実NATは未完了 |
 | Media separation | control/media Endpoint分離、media socketのSTUN、media relay無効化、candidate交換、fail-closed gate、合成stream、ローカルE2Eテスト | 実NAT、長時間、UDP blackhole試験、relay byte実測 |
 | Fly QAD / DO relay | 未実装 | infrastructure・protocol・測定 |
 | 実験基盤 / 最終report | 未実装 | NAT profiles、runner、匿名化・集計、公開測定結果 |
