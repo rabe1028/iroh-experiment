@@ -267,3 +267,25 @@ raw candidate/resultは実IP・一時EndpointIdを含むため公開しない。
 - 登録addressのnetwork変更時のrefresh・失効は自動化していない。呼び出し側で再観測し、古い値は`remove_external_addr`する。
 - H3のlegacy `observe` helperは独立socketの診断用で、same-socketはfalse。
 - mapping一致はpeerへの到達性を保証しない。Fly QAD・実peerとの比較、30/100回のmatrix、長時間media、relay byte実測は未完了。
+
+
+## スマホのブラウザからの予備テスト
+
+配置済みobserverの`https://<observer-host>/test`（または`/`）で測定する。
+Worker Static AssetsでHTML/CSS/JavaScriptを配信し、同じoriginの`/observe`を使う。
+カメラ・マイク、追加のDB、TURN、外部のJavaScript配信は不要。
+
+1. モバイル回線を測るときはスマホのWi-Fiをオフにし、ページで回線ラベルを選ぶ。
+2. 「測定をはじめる」でHTTPSを5回観測し、HTTP/3だった回数、edgeのIP・port・coloを表示する。
+3. 続いてWebRTC DataChannelのICE収集で`stun:stun.cloudflare.com:3478`のUDP srflx候補を収集する（最大8秒）。camera/microphoneは要求しない。
+4. 「JSONを保存」で回線ラベル・時刻・各試行を端末へ保存する。IPを含むためraw結果は公開しない。
+
+HTTP/3はブラウザが選択する。H2以下だけでもUDP遮断の証拠にはならない。
+STUNの候補未取得も、ブラウザのプライバシー制限・回線等を切り分ける必要がある。
+HTTPとWebRTCは別socketで、アドレス一致をsame-socket証拠に使わない。
+結果は`same_socket: false`、`iroh_peer_tested: false`、`nat_traversal_tested: false`を明記する。
+このページは相手端末とのデータ転送・iroh NAT越えを実行しない。そちらはnative `nat-peer`で測る。
+ページは結果をメモリ内に保持し、結果保存用のAPI・DBへ送信しない。
+
+[WebRTCのICE接続手順](https://webrtc.org/getting-started/peer-connections)と
+[Cloudflare Workersのprotocol対応](https://developers.cloudflare.com/workers/reference/protocols/)を参照。

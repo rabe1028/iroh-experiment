@@ -72,8 +72,8 @@ test("no edge IP fails rather than returning a successful invented observation",
   assert.equal(response.status, 503);
 });
 
-test("only the exact observation path and GET/HEAD are accepted", async () => {
-  for (const path of ["/", "/observe/", "/observe-other"]) {
+test("unknown routes and non-read methods are rejected; observation HEAD has no body", async () => {
+  for (const path of ["/observe/", "/observe-other", "/other", "/test/"]) {
     assert.equal((await worker.fetch(request(path))).status, 404);
   }
   const post = await worker.fetch(request("/observe", { method: "POST" }));
@@ -82,4 +82,34 @@ test("only the exact observation path and GET/HEAD are accepted", async () => {
   const head = await worker.fetch(request("/observe", { method: "HEAD" }));
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
+});
+
+test("mobile page and its assets are served without requiring observation headers", async () => {
+  const paths = [];
+  const env = { ASSETS: { async fetch(req) {
+    paths.push(new URL(req.url).pathname);
+    return new Response(req.method === "HEAD" ? null : "asset", {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  } } };
+  for (const path of ["/", "/test", "/browser.js", "/browser.css"]) {
+    const response = await worker.fetch(new Request("https://observe.example.com" + path), env);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "asset");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.match(response.headers.get("content-security-policy"), /script-src 'self'/);
+    assert.equal(response.headers.get("x-observed-ip"), null);
+    const post = await worker.fetch(request(path, { method: "POST" }), env);
+    assert.equal(post.status, 405);
+    assert.equal(post.headers.get("allow"), "GET, HEAD");
+  }
+  assert.deepEqual(paths, ["/", "/", "/browser.js", "/browser.css"]);
+  const head = await worker.fetch(request("/test", { method: "HEAD" }), env);
+  assert.equal(await head.text(), "");
+});
+
+test("missing static asset binding fails explicitly without changing the observer", async () => {
+  assert.equal((await worker.fetch(request("/test"))).status, 503);
+  assert.equal((await worker.fetch(request("/observe"))).status, 200);
 });

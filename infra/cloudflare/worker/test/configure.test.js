@@ -24,6 +24,7 @@ test("configuration uses a custom domain and scopes both rules to that host's ex
   assert.deepEqual(config.routes, [{ pattern: "observe.example.com", custom_domain: true }]);
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
+  assert.deepEqual(config.assets, { directory: "./public", binding: "ASSETS", run_worker_first: true });
   const plan = JSON.parse(await readFile(`${dir}/zone-plan.local.json`));
   assert.deepEqual(plan.rules.map(r => r.phase), ["http_response_headers_transform", "http_request_cache_settings"]);
   for (const entry of plan.rules) {
